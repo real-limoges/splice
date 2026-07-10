@@ -86,5 +86,39 @@ via live web search during the Phase 1 session, not recalled from memory.
 
 ## Phase 2 build notes
 
-(record any deviations from the reviewed design made during implementation,
-and why)
+Deviations from the reviewed DESIGN.md, and why (details in NOTES.md):
+
+- **Contract ordering (§4.5 vs §5)**: contracts exercise the new functions,
+  and new code reads the added class slots — so the union class shape is
+  applied *before* the contract gate, not after. A contract veto reverts the
+  shape through the same reverse-migration machinery. (Discovered
+  empirically: the original ordering vetoed every class-touching patch.)
+- **Journal keys (§5.3)**: strong keys + explicit lifecycle purging
+  (rollback / promotion / seal) instead of weak keys. SBCL 2.2.9's weak
+  tables corrupt ("Corrupt NEXT-chain") under GC pressure with concurrent
+  access even when every access is mutex-guarded. The design's weak-key
+  intent (entries die with instances) is approximated by purging at the
+  same lifecycle points the design already defines.
+- **`:task-sample` audit entries (§8.2)**: added beyond the design's entry
+  list so criterion §10.3 (zero mixed executions) is verifiable offline
+  from the log, not just asserted in-process.
+- **Fixed-arity shim factories (§4.2)**: the generic `&rest` shim measured
+  exactly 2.0x a plain call on a trivial function, at the §10.7 boundary;
+  per-arity compiled shims (one assoc doing both route lookup and coherence
+  marking) measure 1.33x. Variadic functions still get the `&rest` shim.
+- **Cluster prototype (§9)**: prepare runs compile + static checks; the
+  full contract gate runs at commit (inside INSTALL). Members ramp
+  autonomously — the cohort "ramp of ramps" and partition handling are
+  designed but not built. Pooled SPRT (LLR summation), two-phase
+  prepare/commit with hash-verified source shipping, local-reject
+  escalation, and cluster-wide rollback are built and demonstrated.
+- **`update-instance-for-redefined-class` author signature (§4.1)**:
+  migration functions receive `(instance values-plist)` — forward gets the
+  journal snapshot of old-shape slots (under the union shape nothing is
+  discarded yet, so the CLHS discarded-plist would be empty), backward gets
+  the discarded new-slot values per CLHS.
+- **Fault injection**: implemented natively (same pattern taxonomy as the
+  design); smolder's machinery was unreachable from this session.
+
+Measured outcomes backing the §10 criteria are in
+artifacts/criteria-report.md (generated, committed per run).

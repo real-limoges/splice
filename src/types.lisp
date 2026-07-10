@@ -1,0 +1,92 @@
+;;;; types.lisp — core data structures shared by the router, registrar,
+;;;; migration engine, and lifecycle controller.
+
+(in-package #:splice)
+
+(defstruct fn-patch
+  name            ; symbol naming the function
+  new-fn          ; compiled new implementation
+  new-source      ; source form of the new implementation (for the audit log)
+  new-source-hash
+  old-fn          ; captured original fdefinition (restored on rollback)
+  old-source-hash ; hash of the original's identity (printed repr)
+  shim)           ; installed dispatch shim, while in canary
+
+(defstruct method-patch
+  gf-name qualifiers specializer-names
+  new-fn new-source new-source-hash
+  old-method      ; captured method object (add-method'd back on rollback)
+  shim-method)    ; installed routing method, while in canary
+
+(defstruct class-patch
+  class-name
+  add-slots       ; defclass-style slot specs to add
+  drop-slots      ; slot names dropped by the new shape (retained during canary)
+  migrate-forward ; (instance old-values-plist) -> populates new slots
+  migrate-backward; (instance new-values-plist) -> synthesizes old slots
+  lossy-p         ; author declares reversal lossy => rollback needs a human
+  old-slot-specs  ; captured canonicalized direct-slot specs of the original
+  old-superclass-names)
+
+(defstruct contract
+  name check-fn source)
+
+(defstruct (patch-set (:print-object print-patch-set))
+  name description ticket
+  fn-patches method-patches class-patches contracts
+  (ramp '(5 25 100))
+  (state :registered)
+  (current-fraction 0)
+  (stage-index -1)            ; index into RAMP; -1 = not yet canarying
+  (lock (sb-thread:make-mutex))
+  (paired-fallback nil)       ; opt-in per DESIGN.md §11.5 review decision
+  (alpha 0.01d0) (beta 0.05d0)
+  (sprt-min-n 50) (sprt-max-n 2000)
+  sprt-error sprt-latency     ; per-stage tests, reset on stage entry
+  control-ring
+  (confound-threshold 0.15)   ; control failure rate above this => FROZEN
+  (runtime-contract-interval 200) ; run contracts every N canary observations
+  (pinned-new 0) (pinned-old 0)   ; in-flight task counts, per route
+  (hard-trigger nil)          ; set by anomaly capture; forces rollback
+  (history '())               ; (state . timestamp) transitions, newest first
+  (mixed-executions 0)        ; coherence violations observed (must stay 0)
+  (freeze-reason nil)
+  (last-reversal-report nil)  ; reversal counts from the last rollback
+  (sealed nil))               ; journal released; rollback no longer offered
+
+(defun print-patch-set (ps stream)
+  (print-unreadable-object (ps stream :type t)
+    (format stream "~a ~a ~a%" (patch-set-name ps) (patch-set-state ps)
+            (patch-set-current-fraction ps))))
+
+(defvar *patch-sets* (make-hash-table :test #'eq #+sbcl :synchronized #+sbcl t)
+  "Registry of every patch set this image has seen, terminal states included.")
+
+(defun find-patch-set (name)
+  (gethash name *patch-sets*))
+
+(defun canary-state-p (state)
+  (member state '(:canary-5 :canary-25 :canary-100
+                  ;; any :canary-<n> keyword from a custom ramp
+                  )))
+
+(defun stage-keyword (fraction)
+  (intern (format nil "CANARY-~d" fraction) :keyword))
+
+(defun canary-stage-p (state)
+  (let ((s (symbol-name state)))
+    (and (> (length s) 7) (string= "CANARY-" (subseq s 0 7)))))
+
+(defun active-canary-sets ()
+  "Patch sets currently routing traffic. :promoting is included so fresh
+tasks pin :new and cannot straddle the destructive fdefinition swap;
+:rolling-back and :frozen are included so fresh tasks pin :old."
+  (let ((out '()))
+    (maphash (lambda (name ps)
+               (declare (ignore name))
+               (when (or (canary-stage-p (patch-set-state ps))
+                         (member (patch-set-state ps)
+                                 '(:rolling-back :frozen :promoting)))
+                 (push ps out)))
+             *patch-sets*)
+    out))
