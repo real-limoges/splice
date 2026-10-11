@@ -1,6 +1,5 @@
-;;;; sha256.lisp: pure-CL SHA-256 (FIPS 180-4), used for audit-log hash
-;;;; chaining and source-form fingerprints. Self-contained so splice has no
-;;;; dependencies outside SBCL itself.
+;;;; sha256.lisp: pure-CL SHA-256 (FIPS 180-4) for the audit chain and source
+;;;; hashes, so splice needs nothing beyond SBCL.
 
 (in-package #:splice)
 

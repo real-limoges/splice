@@ -1,13 +1,12 @@
-;;;; lifecycle.lisp: the patch-set state machine, the canary evaluator,
-;;;; and rollback/promotion completion. Rollback / Promotion
-;;;; complete in their own threads: the trigger arrives in a pinned
-;;;; task, and completion must wait for them to drain.
+;;;; lifecycle.lisp: patch-set state machine, canary evaluator, and
+;;;; rollback/promotion. Those two complete in their own threads, since the
+;;;; trigger arrives inside a pinned task that must drain first.
 
 (in-package #:splice)
 
 (defvar *drain-timeout-seconds* 10
-  "How long rollback/promotion waits for in-flight pinned tasks before
-freezing (rollback) or noting unswitched work (promotion).")
+  "How long to wait for pinned tasks before rollback freezes or promotion
+proceeds anyway.")
 
 (defun transition (ps to &rest fields)
   "Move PS to state TO, record history, and audit. Caller holds the lock."
@@ -21,8 +20,8 @@ freezing (rollback) or noting unswitched work (promotion).")
   (reverse (patch-set-history ps)))
 
 (defun fresh-stage-sprts (ps)
-  "New SPRT pair for a stage: error stream tracks the control arm's rate;
-latency stream tests exceedance of the control p95, so p0=0.05 fixed."
+  "New SPRT pair for a stage. Errors track the control arm's rate; latency
+tests exceedance of the control p95, so its p0 is fixed at 0.05."
   (setf (patch-set-sprt-error ps)
         (make-sprt :alpha (patch-set-alpha ps) :beta (patch-set-beta ps)
                    :p0 (or (and (patch-set-control-ring ps)
@@ -40,28 +39,24 @@ latency stream tests exceedance of the control p95, so p0=0.05 fixed."
 
 (defun install (name-or-ps)
   "Take a REGISTERED patch set through contracts into its first canary
-stage. Signals PATCH-VETOED if any contract fails; nothing is installed in
-that case."
+stage. Signals PATCH-VETOED, installing nothing, if any contract fails."
   (let ((ps (if (patch-set-p name-or-ps) name-or-ps
                 (find-patch-set name-or-ps))))
     (assert (eq (patch-set-state ps) :registered) ()
             "~a is ~a, not :registered" (patch-set-name ps)
             (patch-set-state ps))
-    ;; the union class shape must exist before contracts run: contracts
-    ;; exercise the new functions, and new code reads the added slots.
-    ;; Adding slots is behaviorally invisible to old code, and a veto
-    ;; reverts the shape through the same reverse-migration machinery.
+    ;; contracts run new code, which reads the added slots, so the union
+    ;; shape comes first. Old code cannot see it, and a veto reverts it.
     (dolist (cp (patch-set-class-patches ps))
       (begin-class-canary ps cp))
-    ;; contract veto gate: runs against the new functions directly; no shim
-    ;; exists yet, so a veto means no live code path ever routed :new
+    ;; no shim exists yet, so a veto means nothing live ever routed :new
     (handler-case (run-contracts ps :phase :pre-flight)
       (patch-vetoed (e)
         (dolist (cp (patch-set-class-patches ps))
           (rollback-class-patch ps cp))
         (error e)))
     (setf (patch-set-control-ring ps) (make-control-ring))
-    ;; install shims dormant (they route 100% :old until the stage flip)
+    ;; shims start dormant, routing :old until the stage flip
     (install-fn-shims ps)
     (install-method-shims ps)
     (sb-thread:with-mutex ((patch-set-lock ps))
@@ -74,7 +69,7 @@ that case."
                                                (patch-set-method-patches ps))
                       :union-classes (mapcar #'class-patch-class-name
                                              (patch-set-class-patches ps)))
-      ;; the commit: one state flip and the first stage is live
+      ;; one state flip makes the first stage live
       (enter-stage ps 0))
     ps))
 
@@ -93,35 +88,34 @@ that case."
 (defun report-outcome (ps route failure-p latency-ms &key condition)
   "Fold one task outcome into PS's evaluator. Control (:old) outcomes feed
 the baseline; canary (:new) outcomes feed the SPRTs and may trigger a
-transition. Returns the action taken, if any."
+transition. Returns the action taken: :continue when nothing changed, else
+:advanced, :promoting, :rolling-back or :frozen."
   (declare (ignorable condition))
   (sb-thread:with-mutex ((patch-set-lock ps))
     (let ((ring (patch-set-control-ring ps)))
       (unless (canary-stage-p (patch-set-state ps))
         (when (and ring (eq route :old))
           (control-record ring failure-p latency-ms))
-        (return-from report-outcome nil))
-      ;; hard triggers fire regardless of the observing task's route: a
-      ;; migration failure can surface in an old-routed task's touch, and at
-      ;; a 5% ramp the next canary observation could be a long time coming
+        (return-from report-outcome :continue))
+      ;; hard triggers fire on any route: a migration failure can surface in
+      ;; an old-routed task, and at 5% the next canary task may be far off
       (when (patch-set-hard-trigger ps)
-        (initiate-rollback-locked ps (cons :hard-trigger
-                                           (patch-set-hard-trigger ps)))
-        (return-from report-outcome :rolling-back))
+        (return-from report-outcome
+          (initiate-rollback-locked ps (cons :hard-trigger
+                                             (patch-set-hard-trigger ps)))))
       (cond
         ((eq route :old)
          (control-record ring failure-p latency-ms)
-         ;; contemporaneous baseline: refresh H0 as the control arm evolves
+         ;; refresh H0 from the live control arm
          (let ((rate (control-failure-rate ring)))
            (when rate
              (unless (sprt-fixed-p0 (patch-set-sprt-error ps))
                (sprt-set-p0 (patch-set-sprt-error ps) (max rate 1d-3)))
-             ;; confound check: if the control arm itself is degraded,
-             ;; a failing canary verdict would be superstition
+             ;; a degraded control arm makes any canary verdict meaningless
              (when (> rate (patch-set-confound-threshold ps))
                (freeze-locked ps (list :confounded :control-rate rate))
                (return-from report-outcome :frozen))))
-         nil)
+         :continue)
         (t                              ; :new, a canary observation
          (evaluate-canary-observation ps failure-p latency-ms))))))
 
@@ -132,21 +126,20 @@ transition. Returns the action taken, if any."
          (ring (patch-set-control-ring ps))
          (p95 (control-latency-quantile ring 0.95))
          (err-verdict (sprt-observe err-sprt failure-p))
-         ;; latency exceedance with a noise margin: strictly above
-         ;; max(1.5*p95, p95+0.5ms) counts
+         ;; slow means above max(1.5*p95, p95+0.5ms)
          (lat-verdict (if p95
                           (sprt-observe lat-sprt
                                         (> latency-ms
                                            (max (* 1.5 p95) (+ p95 0.5))))
                           :continue)))
-    ;; runtime contract sampling: structural breakage is not a rate question
+    ;; sample runtime contracts: structural breakage is not a rate question
     (when (and (plusp (patch-set-runtime-contract-interval ps))
                (zerop (mod (sprt-n err-sprt)
                            (patch-set-runtime-contract-interval ps))))
       (let ((failing (run-contracts ps :phase :runtime)))
         (when (and failing (not (eq failing t)))
-          (initiate-rollback-locked ps (list :runtime-contract failing))
-          (return-from evaluate-canary-observation :rolling-back))))
+          (return-from evaluate-canary-observation
+            (initiate-rollback-locked ps (list :runtime-contract failing))))))
     (cond
       ;; either stream rejecting is a rollback
       ((or (eq err-verdict :reject) (eq lat-verdict :reject))
@@ -156,8 +149,7 @@ transition. Returns the action taken, if any."
                                  :direction :reject
                                  :n (sprt-n sprt) :llr (sprt-llr sprt))
          (initiate-rollback-locked
-          ps (list :sprt-reject (sprt-snapshot sprt stream))))
-       :rolling-back)
+          ps (list :sprt-reject (sprt-snapshot sprt stream)))))
       ;; stage advances only when BOTH streams accept health
       ((and (eq err-verdict :accept) (eq lat-verdict :accept))
        (signal 'canary-verdict :patch-set ps :stream-kind :both
@@ -167,8 +159,7 @@ transition. Returns the action taken, if any."
            (progn (enter-stage ps (1+ (patch-set-stage-index ps)))
                   :advanced)
            (progn (begin-promotion-locked ps) :promoting)))
-      ;; stage budget exhausted between the boundaries: freeze, never a silent
-      ;; promote
+      ;; stage budget spent without a verdict: freeze, never promote silently
       ((or (eq err-verdict :undecided) (eq lat-verdict :undecided))
        (freeze-locked ps (list :stage-timeout
                                :errors (sprt-snapshot err-sprt :errors)
@@ -180,8 +171,9 @@ transition. Returns the action taken, if any."
 ;;; Rollback
 
 (defun initiate-rollback-locked (ps trigger)
-  "Caller holds the lock. Flips routing off instantly (new tasks pin :old
-from here on) and hands completion to a drain thread."
+  "Caller holds the lock. Routes new tasks to :old at once and hands
+completion to a drain thread. Returns :rolling-back, or :frozen when a lossy
+class reversal needs an operator."
   ;; a lossy class reversal must not proceed automatically
   (when (and (some #'class-patch-lossy-p (patch-set-class-patches ps))
              (not (eq (car (if (consp trigger) trigger (list trigger)))
@@ -196,7 +188,8 @@ from here on) and hands completion to a drain thread."
   (signal 'rollback-initiated :patch-set ps :trigger trigger)
   (sb-thread:make-thread (lambda () (complete-rollback ps))
                          :name (format nil "splice-rollback-~a"
-                                       (patch-set-name ps))))
+                                       (patch-set-name ps)))
+  :rolling-back)
 
 (defun wait-for-drain (counter-fn timeout-seconds)
   (loop with deadline = (+ (get-internal-real-time)
@@ -208,8 +201,7 @@ from here on) and hands completion to a drain thread."
         finally (return t)))
 
 (defun complete-rollback (ps)
-  "Runs in its own thread: drain :new-pinned tasks, restore the old world,
-reverse-migrate instances, verify, audit."
+  "Drain :new-pinned tasks, restore the old world, reverse-migrate, verify."
   (handler-case
       (progn
         (unless (wait-for-drain (lambda () (patch-set-pinned-new ps))
@@ -222,7 +214,7 @@ reverse-migrate instances, verify, audit."
         (let ((reversal-reports
                 (mapcar (lambda (cp) (rollback-class-patch ps cp))
                         (patch-set-class-patches ps))))
-          ;; verify restoration is exact before declaring success
+          ;; verify restoration before declaring success
           (let ((unrestored
                   (remove-if (lambda (fp)
                                (eq (fdefinition (fn-patch-name fp))
@@ -258,9 +250,7 @@ reverse-migrate instances, verify, audit."
   "Quiescence check, then the destructive install of the new world."
   (let ((drained (wait-for-drain (lambda () (patch-set-pinned-old ps))
                                  *drain-timeout-seconds*)))
-    ;; unswitched task-scoped work is only noted; old code stays valid
-    ;; right up to the swap, and non-task threads adopt new code on their
-    ;; next call through the swapped fdefinition
+    ;; undrained tasks are only noted: old code stays valid up to the swap
     (unless drained
       (audit :promotion-quiescence :patch-set (patch-set-name ps)
                                    :unswitched-old-pinned (patch-set-pinned-old ps)))
@@ -338,8 +328,7 @@ Every resolution is audited with the operator's identity."
   (remhash name *patch-sets*))
 
 (defun wait-for-state (name-or-ps states &key (timeout 30))
-  "Block until the set reaches one of STATES (rollback/promotion complete in
-their own threads). Returns the state reached, or NIL on timeout."
+  "Block until the set reaches one of STATES. Returns it, or NIL on timeout."
   (let ((ps (if (patch-set-p name-or-ps) name-or-ps
                 (find-patch-set name-or-ps)))
         (deadline (+ (get-internal-real-time)

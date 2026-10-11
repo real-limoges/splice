@@ -1,6 +1,6 @@
-;;;; conditions.lisp: the splice condition hierarchy.
-;;;; All splice decisions travel as conditions so operators at a REPL can
-;;;; interact with a live incident through standard restart machinery.
+;;;; conditions.lisp: splice condition hierarchy.
+;;;; Decisions travel as conditions so a REPL operator can steer a live
+;;;; incident with ordinary restarts.
 
 (in-package #:splice)
 
@@ -16,9 +16,8 @@
                      (patch-vetoed-contract c)
                      (patch-vetoed-detail c)))))
 
-;; Signaled (not raised as an error) each time new-routed code misbehaves;
-;; the evaluator listens, the audit log records, and the task's own error
-;; handling proceeds unless paired fallback intercepts.
+;; Signaled when new-routed code misbehaves. The task's own error handling
+;; still runs unless paired fallback intercepts.
 (define-condition canary-anomaly (splice-condition)
   ((task :initarg :task :reader canary-anomaly-task)
    (cause :initarg :cause :reader canary-anomaly-cause))

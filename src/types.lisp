@@ -1,5 +1,4 @@
-;;;; types.lisp: core data structures shared by the router, registrar,
-;;;; migration engine, and lifecycle controller.
+;;;; types.lisp
 
 (in-package #:splice)
 
@@ -8,7 +7,7 @@
   new-fn          ; compiled new implementation
   new-source      ; source form of the new implementation (for the audit log)
   new-source-hash
-  old-fn          ; captured original fdefinition (restored on rollback)
+  old-fn          ; captured original fdefinition (in case of rollback)
   old-source-hash ; hash of the original's identity (printed repr)
   shim)           ; installed dispatch shim, while in canary
 
@@ -78,9 +77,8 @@
     (and (> (length s) 7) (string= "CANARY-" (subseq s 0 7)))))
 
 (defun active-canary-sets ()
-  "Patch sets currently routing traffic. :promoting is included so fresh
-tasks pin :new and cannot straddle the destructive fdefinition swap;
-:rolling-back and :frozen are included so fresh tasks pin :old."
+  "Patch sets that fresh tasks must pin against: canary stages, plus
+:promoting (pins :new across the swap) and :rolling-back or :frozen (pin :old)."
   (let ((out '()))
     (maphash (lambda (name ps)
                (declare (ignore name))

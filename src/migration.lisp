@@ -1,31 +1,25 @@
 ;;;; migration.lisp: reversible class redefinition.
-;;;; During canary the class wears the UNION shape (old slots ∪ new slots) so
-;;;; old code stays correct; promotion applies the final shape, rollback the
-;;;; original. Forward migration journals per-instance pre-state (weak keys)
-;;;; so reversal is exact for migrated survivors; canary-born instances get
-;;;; author-defined backward synthesis, flagged in the audit log.
+;;;; During canary the class has the UNION shape (old + new slots) so old code
+;;;; stays correct; promotion applies the final shape, rollback the original.
+;;;; Forward migration journals each instance's pre-state for an exact
+;;;; reversal. Canary-born instances get author-defined backward synthesis.
 
 (in-package #:splice)
 
 (defvar *migration-registry* (make-hash-table :test #'eq)
-  "class-name -> (class-patch . phase), phase ∈ :forward :backward :finalize.
+  "class-name -> (class-patch . phase), phase in (:forward :backward :finalize)
 Consulted by the global UPDATE-INSTANCE-FOR-REDEFINED-CLASS method.")
 
 (defvar *migration-journal* (make-hash-table :test #'eq)
-  "instance -> (:set name :seq n :values plist-of-pre-migration-slot-values).
-Weak keys would be the natural fit, but on SBCL 2.2.9 weak tables corrupt under
-GC pressure with concurrent access (reproducible \"Corrupt NEXT-chain\"
-crashes even with all access mutex-guarded), so this build uses strong keys
-with explicit lifecycle purging instead: entries for a class are released at
-rollback completion, and at SEAL-PATCH after promotion (the end of
-the journal retention window). All access goes through *MIGRATION-LOCK*.")
+  "instance -> (:set name :seq n :values pre-migration-slot-plist).
+Strong keys, because SBCL 2.2.9 weak tables corrupt (\"Corrupt NEXT-chain\")
+under GC pressure even when mutex-guarded. Entries are purged at rollback, or
+at SEAL-PATCH after promotion. Guarded by *MIGRATION-LOCK*.")
 
 (defvar *canary-population* (make-hash-table :test #'eq)
-  "instance -> (class-name . creator-route), for instances of tracked classes
-(strong keys, see *MIGRATION-JOURNAL*, purged at rollback/promotion)
-created during a canary. They have no pre-migration state: reversal must
-synthesize when new code created them, and must leave them alone when old
-code did (their old slots are already canonical).")
+  "instance -> (class-name . creator-route), for tracked instances created
+during a canary. With no pre-state to restore, reversal synthesizes the ones
+new code made and leaves the old-code ones alone. Strong keys, as above.")
 
 (defvar *tracked-classes* (make-hash-table :test #'eq)
   "class-name -> patch-set, while a class patch is in flight.")
@@ -55,8 +49,7 @@ code did (their old slots are already canonical).")
             :writers (nreverse writers) :type type))))
 
 (defun capture-class-shape (class-name)
-  "Canonical direct-slot specs + superclass names of CLASS-NAME as it exists
-now: the old world that rollback restores."
+  "Current direct-slot specs and superclass names: what rollback restores."
   (let ((class (find-class class-name)))
     (sb-mop:finalize-inheritance class)
     (values
@@ -78,8 +71,7 @@ now: the old world that rollback restores."
                        :metaclass (class-of (find-class class-name))))
 
 (defun class-patch-union-slots (cp)
-  "Old slots ∪ added slots. Dropped slots are retained during canary so old
-code stays correct."
+  "Old slots plus added ones; dropped slots stay until promotion."
   (append (class-patch-old-slot-specs cp)
           (remove-if (lambda (spec)
                        (find (getf spec :name)
@@ -107,9 +99,8 @@ code stays correct."
         when (slot-boundp instance name)
           append (list name (slot-value instance name))))
 
-;;; The single UPDATE-INSTANCE-FOR-REDEFINED-CLASS integration point.
-;;; One :AFTER method on STANDARD-OBJECT consulting the registry, rather than
-;;; per-class generated methods: one hash lookup on non-tracked classes.
+;;; One :AFTER method on STANDARD-OBJECT consults the registry, instead of
+;;; generating a method per class. Untracked classes pay one hash lookup.
 
 (defmethod update-instance-for-redefined-class :after
     ((instance standard-object) added-slots discarded-slots property-list
@@ -147,9 +138,8 @@ Any error is a MIGRATION-FAILURE, a hard rollback trigger."
         (audit :instance-migration :direction :forward
                                    :class (class-patch-class-name cp) :journal-seq seq
                                    :outcome :failed :cause (princ-to-string e))
-        ;; arm the owning set's hard trigger directly: the touch that fired
-        ;; this migration may be in an old-routed task, which no shim
-        ;; anomaly-capture would see
+        ;; arm the hard trigger directly: an old-routed task may have fired
+        ;; this, and no shim would see it
         (let ((ps (gethash (class-patch-class-name cp) *tracked-classes*)))
           (when ps
             (setf (patch-set-hard-trigger ps)
@@ -158,9 +148,8 @@ Any error is a MIGRATION-FAILURE, a hard rollback trigger."
                                   :cause e)))))
 
 (defun migrate-instance-backward (cp instance discarded-slots property-list)
-  "Exact restore from the journal when pre-migration state exists; otherwise
-the instance was canary-born and the author's backward migration synthesizes
-old-shape values (flagged :synthesized-reversal)."
+  "Restore from the journal when possible. Otherwise the instance was
+canary-born, and the author's backward migration synthesizes old values."
   (declare (ignore discarded-slots))
   (multiple-value-bind (record birth)
       (sb-thread:with-mutex (*migration-lock*)
@@ -178,8 +167,7 @@ old-shape values (flagged :synthesized-reversal)."
                                       :journal-seq (getf record :seq))
            :journal-exact)
           ((eq (cdr birth) :old)
-           ;; canary-born via old code: its old slots are canonical already;
-           ;; dropping the added slots is the whole rollback
+           ;; made by old code: dropping the added slots is the whole rollback
            (audit :instance-migration :direction :backward
                                       :mode :old-born-unchanged
                                       :class (class-patch-class-name cp))
@@ -198,8 +186,7 @@ old-shape values (flagged :synthesized-reversal)."
         (error 'migration-failure :instance instance :direction :backward
                                   :cause e)))))
 
-;;; Track canary-born instances of patched classes, so reversal can find and
-;;; synthesize them (they never pass through forward migration).
+;;; Track canary-born instances, which never pass through forward migration.
 (defmethod initialize-instance :after ((instance standard-object)
                                        &rest initargs)
   (declare (ignore initargs))
@@ -227,15 +214,14 @@ old-shape values (flagged :synthesized-reversal)."
                       :retained-drops (class-patch-drop-slots cp)))
 
 (defun touch-instance (instance)
-  "Force any pending UPDATE-INSTANCE-FOR-REDEFINED-CLASS via a real slot
-access (obsolete-instance traps fire on slot access, not class inspection)."
+  "Force a pending instance update. Only slot access trips the trap."
   (let ((slots (sb-mop:class-slots (class-of instance))))
     (when slots
       (slot-boundp instance (sb-mop:slot-definition-name (first slots))))))
 
 (defun eager-migrate-population (class-name)
-  "Force lazy migration now by touching every known instance. Returns the
-count touched."
+  "Migrate now instead of lazily by touching every known instance. Returns
+the count touched."
   (let ((instances '()))
     (sb-thread:with-mutex (*migration-lock*)
       (maphash (lambda (inst birth)
@@ -250,17 +236,15 @@ count touched."
     (length instances)))
 
 (defun rollback-class-patch (ps cp)
-  "Reverse migration: revert the class to its original
-shape, then eagerly walk every journaled or canary-born instance so the
-rollback completes with deterministic counts. Returns the report plist."
+  "Revert the class, then touch every journaled or canary-born instance so
+the counts are deterministic. Returns the report plist."
   (let ((class-name (class-patch-class-name cp))
         (exact 0) (synthesized 0) (old-born 0) (failed 0))
     (setf (gethash class-name *migration-registry*) (cons cp :backward))
     (apply-class-shape class-name
                        (class-patch-old-slot-specs cp)
                        (class-patch-old-superclass-names cp))
-    ;; eager walk: touching an obsolete instance triggers its update, which
-    ;; lands in MIGRATE-INSTANCE-BACKWARD above
+    ;; each touch lands in MIGRATE-INSTANCE-BACKWARD
     (let ((instances '()))
       (sb-thread:with-mutex (*migration-lock*)
         (maphash (lambda (inst record)
@@ -306,18 +290,14 @@ rollback completes with deterministic counts. Returns the report plist."
     (eager-migrate-population class-name)
     (remhash class-name *migration-registry*)
     (remhash class-name *tracked-classes*)
-    ;; population is dead weight now; the journal stays until SEAL-PATCH
-    ;; (rollback of a promoted set is no longer offered, but the retention
-    ;; window preserves the evidence trail)
+    ;; drop the population; the journal stays until SEAL-PATCH as evidence
     (purge-class-tracking class-name :journal nil)
     (audit :class-shape :class class-name :shape :new
                         :patch-set (patch-set-name ps)
                         :dropped (class-patch-drop-slots cp))))
 
 (defun purge-class-tracking (class-name &key (journal t) (population t))
-  "Release tracking entries for CLASS-NAME. Population entries are useless
-once a canary ends; journal entries are consumed by rollback or released at
-seal time (retention window) after promotion."
+  "Release tracking entries for CLASS-NAME."
   (sb-thread:with-mutex (*migration-lock*)
     (flet ((purge (table test)
              (let ((victims '()))

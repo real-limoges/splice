@@ -1,21 +1,16 @@
 ;;;; cluster.lisp: distributed patch propagation prototype.
 ;;;;
-;;;; Topology: one conductor, N member images, sexp-over-TCP. Two-phase
-;;;; propagation: PREPARE ships the patch spec (source forms + expected
-;;;; hash); each member independently compiles, registers, and runs static
-;;;; checks. Any veto aborts the cluster. COMMIT starts each member's local
-;;;; canary (contract gate + ramp). Members stream SPRT health; the
-;;;; conductor pools log-likelihood ratios (LLRs are sums over observations,
-;;;; so per-node LLRs add) and broadcasts rollback on either a local reject
-;;;; or a pooled reject. Safety never waits on the network for local hard
-;;;; triggers, which roll back locally first and then report.
+;;;; One conductor, N member images, sexps over TCP. PREPARE ships source
+;;;; forms plus a hash; each member compiles and runs static checks, and any
+;;;; veto aborts the cluster. COMMIT starts each member's local canary.
+;;;; Members stream SPRT health; the conductor sums their LLRs and broadcasts
+;;;; rollback on a local or pooled reject. Local hard triggers roll back
+;;;; first and report after, never waiting on the network.
 ;;;;
-;;;; Prototype limitations:
-;;;; - contract checks run at COMMIT (inside INSTALL), not PREPARE; PREPARE
-;;;;   covers compile + static checks.
-;;;; - members ramp autonomously (a "ramp of ramps" cohort policy is not
-;;;;   implemented); the conductor gates nothing but rollback.
-;;;; - partition handling is not exercised (single host, no link failures).
+;;;; Limitations:
+;;;; - contracts run at COMMIT (inside INSTALL), not PREPARE.
+;;;; - members ramp independently; the conductor gates only rollback.
+;;;; - no partition handling (single host, no link failures).
 
 (in-package #:splice/cluster)
 
@@ -37,8 +32,8 @@
 ;;; The wire format of a patch set: source forms + integrity hash
 
 (defun currency-patch-spec ()
-  "The flagship patch set as shippable source. The conductor computes the
-hash over the printed forms; members recompute and refuse a mismatch."
+  "The flagship patch set as shippable source, hashed over its printed
+forms so members can refuse a mismatch."
   (let ((functions
           '((price-order
              (lambda (order)
@@ -78,8 +73,7 @@ hash over the printed forms; members recompute and refuse a mismatch."
           :hash (splice:sha256-hex (prin1-to-string functions)))))
 
 (defun build-patch-set-from-spec (spec)
-  "Member side: verify integrity, compile the shipped sources, assemble the
-patch set against local definitions."
+  "Verify the hash, compile the shipped sources, and register the set."
   (let ((functions (getf spec :functions)))
     (unless (equal (getf spec :hash)
                    (splice:sha256-hex (prin1-to-string functions)))
@@ -141,8 +135,7 @@ Drives its own synthetic workload once committed."
                (splice/harness:reset-workload)
                (setf splice/harness:*fault*
                      (when fault (splice/harness:make-fault :kind fault)))
-               ;; the pre-existing population: instances that live through
-               ;; forward migration and must journal-exact restore on rollback
+               ;; orders that must survive forward migration and restore on rollback
                (setf orders (splice/harness:make-pre-existing-orders
                              (splice/harness:make-rng port) 20))
                (handler-case
@@ -159,10 +152,12 @@ Drives its own synthetic workload once committed."
                (splice:patch-vetoed (e)
                  (send-form stream (list :veto :reason (princ-to-string e))))))
             (:rollback
-             (sb-thread:with-mutex ((splice::patch-set-lock ps))
-               (when (splice::canary-stage-p (splice:patch-set-state ps))
-                 (splice::initiate-rollback-locked ps '(:conductor-command))))
-             (send-form stream (list :rolling-back)))
+             (send-form stream
+                        (list (sb-thread:with-mutex ((splice::patch-set-lock ps))
+                                (if (splice::canary-stage-p (splice:patch-set-state ps))
+                                    (splice::initiate-rollback-locked
+                                     ps '(:conductor-command))
+                                    :continue)))))
             (:report
              (setf (car stop) t)
              (when worker (ignore-errors (sb-thread:join-thread worker)))
@@ -243,10 +238,9 @@ the conductor every 200 tasks."
 
 (defun run-conductor (members-spec &key (alpha 0.01d0) (beta 0.05d0)
                                         (log-path "/tmp/splice-conductor.log"))
-  "MEMBERS-SPEC: list of (host port &key fault). Returns the final reports.
-Implements pooled-SPRT aggregation: cluster LLR = sum of member LLRs, tested
-against the same Wald thresholds; any member's local rollback also triggers
-a cluster-wide rollback."
+  "MEMBERS-SPEC is a list of (host port &key fault). Rolls back the cluster
+when the summed member LLRs cross the Wald upper bound or any member rolls
+back locally. Returns the final reports."
   (splice:open-audit-log log-path)
   (let* ((spec (currency-patch-spec))
          (upper (log (/ (- 1d0 beta) alpha)))

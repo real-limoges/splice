@@ -1,21 +1,19 @@
-;;;; harness.lisp: synthetic order-processing workload with realistic
-;;;; injected fault patterns. The flagship patch set moves
-;;;; order math from float dollars to rational minor units: three
-;;;; interdependent functions + a method + a class redefinition.
+;;;; harness.lisp: synthetic order-processing workload with injected faults.
+;;;; The flagship patch set moves order math from float dollars to rational
+;;;; minor units (three functions, a method, and a class redefinition).
 ;;;;
-;;;; Fault patterns (not uniform coin flips):
-;;;;   :latent          fails only for a p-fraction input subclass (VIP codes)
-;;;;   :load-correlated fails only above a canary-concurrency threshold
-;;;;   :slow-burn       no errors; latency regression only
-;;;;   :delayed-onset   healthy for N calls, then degrades (leak shape)
-;;;;   :migration       the forward instance migration fails on rare states
-;;;;   nil              clean patch (for false-positive-rate measurement)
+;;;; Fault kinds:
+;;;;   :latent          fails only for VIP-coded orders
+;;;;   :load-correlated fails above a canary traffic share
+;;;;   :slow-burn       latency regression, no errors
+;;;;   :delayed-onset   healthy for N calls, then fails
+;;;;   :migration       forward migration fails on corrupted orders
+;;;;   nil              clean patch (false-positive baseline)
 
 (in-package #:splice/harness)
 
 ;;; ---------------------------------------------------------------------
-;;; Deterministic PRNG (64-bit LCG): every session is reproducible from
-;;; its seed; no CL:RANDOM state leaks into results.
+;;; Deterministic 64-bit LCG, so every session is reproducible from its seed.
 
 (defstruct (rng (:constructor %make-rng)) (state 88172645463325252))
 
@@ -34,8 +32,7 @@
 (defun rng-range (rng lo hi)
   (+ lo (mod (rng-next rng) (1+ (- hi lo)))))
 
-;;; ---------------------------------------------------------------------
-;;; The application under patch: an order-processing service
+;;; --- The application under patch: an order-processing service
 
 (defclass order ()
   ((id :initarg :id :initform 0 :accessor order-id)
@@ -47,7 +44,7 @@
    (status :initform :new :accessor order-status)))
 
 (defun order-cents (order)
-  "Read the patched representation (only exists under the union/new shape)."
+  "Read the patched representation (only exists under the union/new slots)."
   (slot-value order 'amount-minor-units))
 
 (defun discount-multiplier (code)
@@ -81,11 +78,9 @@
   (format stream "$~,2f" (order-float-total order)))
 
 (defun process-order (order)
-  "The task body: the pipeline whose interdependence makes coherence matter.
-Mixing old and new implementations across these calls corrupts totals.
-Returns whatever TOTAL-INVOICE returns; the driver is deliberately agnostic
-to the money representation, so it survives the representation patch without
-being a member of the set (a slot-reading driver would have to be included)."
+  "The task body; mixing old and new implementations here corrupts totals.
+Agnostic to the money representation, so it survives the patch without
+joining the set."
   (price-order order)
   (apply-discount order)
   (let ((total (total-invoice order)))
@@ -130,8 +125,8 @@ being a member of the set (a slot-reading driver would have to be included)."
 (defun fault-active-p (kind) (and *fault* (eq (fault-kind *fault*) kind)))
 
 (defun fault-window-note (f which)
-  "Track total vs canary calls over a ~10ms sliding bucket (approximate
-rotation races are fine; the window is statistical, not exact)."
+  "Count total vs canary calls in a ~10ms bucket. Rotation races are
+tolerable; the window is statistical."
   (let* ((now (get-internal-real-time))
          (bucket-ticks (max 1 (round (* 0.010 internal-time-units-per-second))))
          (w (fault-window f)))
@@ -152,9 +147,7 @@ rotation races are fine; the window is statistical, not exact)."
                   (order-discount-code order))))
         (:load-correlated
          (when (eq site :price)
-           ;; the new code leans on a shared resource that saturates once
-           ;; canary traffic exceeds a share of total traffic: invisible at
-           ;; a 5% ramp, tripping at 25%: the reason staged ramps exist
+           ;; saturates above a canary share: invisible at 5%, trips at 25%
            (fault-window-note f :canary)
            (destructuring-bind (start total canary) (fault-window f)
              (declare (ignore start))
@@ -175,23 +168,20 @@ rotation races are fine; the window is statistical, not exact)."
                       n)))))))))
 
 ;;; ---------------------------------------------------------------------
-;;; The flagship patch set: float dollars -> rational minor units.
-;;; New code writes through to FLOAT-TOTAL during canary so old code stays
-;;; correct against the union shape.
+;;; Flagship patch set: float dollars -> rational minor units. New code
+;;; writes through to FLOAT-TOTAL so old code stays correct during canary.
 
 (defvar *fault-rng* nil "RNG serving MAYBE-INJECT draws, seeded per session.")
 
 (defun write-through-float (order cents)
-  "Maintain the dropped-slot correspondence while FLOAT-TOTAL still exists
-(union shape during canary). After promotion the slot is gone and the
-write-through retires with it."
+  "Keep FLOAT-TOTAL in sync while it exists (the canary union shape)."
   (when (slot-exists-p order 'float-total)
     (setf (slot-value order 'float-total) (/ cents 100.0))))
 
 (defun new-price-order (order)
   (maybe-inject :price order (if *fault-rng* (rng-uniform *fault-rng*) 0.5))
   (let ((cents (round (* 100 (order-item-count order)
-                          (rational (order-unit-price order))))))
+                         (rational (order-unit-price order))))))
     (setf (slot-value order 'amount-minor-units) cents
           (order-status order) :priced)
     (write-through-float order cents)
@@ -231,10 +221,10 @@ write-through retires with it."
                         :discount-code code))
 
 (defun register-currency-patch-set (&key (ramp '(5 25 100)) (alpha 0.01d0)
-                                         (beta 0.05d0) (min-n 50) (max-n 2000)
-                                         paired-fallback)
-  "Build and register a fresh flagship patch set. Faults are injected via
-*FAULT*, so the same set serves clean and faulty sessions."
+                                      (beta 0.05d0) (min-n 50) (max-n 2000)
+                                      paired-fallback)
+  "Register a fresh flagship patch set. Faults come from *FAULT*, so one set
+serves every session."
   (unregister-patch-set 'currency-migration)
   (register-patch-set
    (splice::make-patch-set
@@ -338,32 +328,31 @@ write-through retires with it."
         :discount-code (order-discount-code order)))
 
 (defun make-pre-existing-orders (rng count &key corrupted)
-  "Instances that exist before the patch: the population forward migration
-must move and reverse migration must restore. CORRUPTED seeds orders whose
-forward migration fails under the :migration fault."
+  "Orders that predate the patch, for migration to move and rollback to
+restore. CORRUPTED orders fail forward migration under :migration."
   (let ((orders (loop for i from 1 to count
                       collect (let ((o (make-instance 'order
-                                        :id i
-                                        :item-count (rng-range rng 1 9)
-                                        :unit-price (/ (rng-range rng 100 9999) 100.0)
-                                        :discount-code (case (mod (rng-next rng) 5)
-                                                         (0 "TEN") (1 "VIP")
-                                                         (t nil)))))
-                        (price-order o)
-                        o))))
+                                                      :id i
+                                                      :item-count (rng-range rng 1 9)
+                                                      :unit-price (/ (rng-range rng 100 9999) 100.0)
+                                                      :discount-code (case (mod (rng-next rng) 5)
+                                                                       (0 "TEN") (1 "VIP")
+                                                                       (t nil)))))
+                                (price-order o)
+                                o))))
     (dotimes (i (or corrupted 0))
       (let ((o (nth (* 3 i) orders)))
         (setf (order-float-total o) -5.0 (order-status o) :corrupted)))
     orders))
 
 (defun run-canary-session (&key (fault nil) (seed 42) (max-tasks 20000)
-                                (ramp '(5 25 100)) (alpha 0.01d0) (beta 0.05d0)
-                                (min-n 50) (max-n 2000)
-                                (pre-existing 40) (threads 1)
-                                (touch-pre-existing-every 11)
-                                paired-fallback quiet)
-  "One full patch lifecycle under synthetic load. Returns a SESSION-RESULT.
-Assumes an audit log is already open (each caller decides log granularity)."
+                             (ramp '(5 25 100)) (alpha 0.01d0) (beta 0.05d0)
+                             (min-n 50) (max-n 2000)
+                             (pre-existing 40) (threads 1)
+                             (touch-pre-existing-every 11)
+                             paired-fallback quiet)
+  "Run one patch lifecycle under synthetic load; return a SESSION-RESULT.
+Expects an open audit log."
   (reset-workload)
   (reset-coherence-tracking)
   (let* ((rng (make-rng seed))
@@ -388,34 +377,29 @@ Assumes an audit log is already open (each caller decides log granularity)."
           (make-session-result :final-state :vetoed :veto-p t
                                :transitions (princ-to-string e)))))
     (flet ((run-one (i task-rng)
-             ;; think-time under threads: without it, slow canary tasks
-             ;; dominate worker wall-time and load no longer tracks the ramp
+             ;; think time keeps load tracking the ramp when canary is slow
              (when (> threads 1) (sleep 0.0002))
              (when (fault-active-p :load-correlated)
                (fault-window-note *fault* :total))
              (with-task (:id i :swallow-errors t)
                (let ((o (if (zerop (mod i touch-pre-existing-every))
-                            ;; periodic touches of pre-existing instances
-                            ;; drive forward migration mid-canary
+                            ;; touch old orders to drive forward migration
                             (nth (mod (rng-next task-rng) (length orders)) orders)
                             (make-instance 'order
-                             :id (+ 1000 i)
-                             :item-count (rng-range task-rng 1 9)
-                             :unit-price (/ (rng-range task-rng 100 9999) 100.0)
-                             :discount-code (case (mod (rng-next task-rng) 5)
-                                              (0 "TEN") (1 "VIP") (t nil))))))
+                                           :id (+ 1000 i)
+                                           :item-count (rng-range task-rng 1 9)
+                                           :unit-price (/ (rng-range task-rng 100 9999) 100.0)
+                                           :discount-code (case (mod (rng-next task-rng) 5)
+                                                            (0 "TEN") (1 "VIP") (t nil))))))
                  (process-order o))))
            (terminal-p ()
-             ;; :promoting / :rolling-back mean the decision is made; stop
-             ;; driving load so the completion thread isn't mutex-starved by
-             ;; a zero-think-time loop no real workload resembles
+             ;; once decided, stop load so completion isn't mutex-starved
              (member (patch-set-state ps)
                      '(:promoted :rolled-back :frozen :vetoed
                        :promoting :rolling-back))))
       (if (> threads 1)
-          ;; fresh threads do NOT inherit dynamic bindings: each worker must
-          ;; rebind the session's fault (shared object; its counters are
-          ;; atomic) and get its own PRNG
+          ;; threads don't inherit dynamic bindings: rebind the shared
+          ;; fault and give each worker its own PRNG
           (let* ((fault-obj *fault*)
                  (workers
                    (loop for w from 0 below threads
@@ -458,9 +442,8 @@ Assumes an audit log is already open (each caller decides log granularity)."
       result)))
 
 (defun detection-observations-from-audit (&optional (after-seq 0))
-  "SPRT sample count at the rollback decision, parsed back out of the audit
-log (the log is the source of truth for decisions, so read it from there).
-Only entries after AFTER-SEQ count; the log may span many sessions."
+  "SPRT sample count at the rollback decision, read from audit log entries
+after AFTER-SEQ."
   (when splice:*audit-log*
     (let ((*package* (find-package :splice)))
       (loop for line in (splice::audit-log-lines splice:*audit-log*)
@@ -473,10 +456,8 @@ Only entries after AFTER-SEQ count; the log may span many sessions."
                      (return (getf (second trigger) :n))))))))
 
 (defun compare-rollback-exactness (orders pre-snapshot ps)
-  "Criterion C4: after rollback, fdefinitions are EQ to the originals,
-the class shape is the original, and pre-existing orders match their
-pre-patch snapshot (forward-migrated ones must have been journal-restored;
-business mutations made during the canary revert by design)."
+  "Check rollback exactness: fdefinitions EQ the originals, the class shape
+is original, and pre-existing orders match their pre-patch snapshot."
   (let ((fn-ok (every (lambda (fp)
                         (eq (fdefinition (splice::fn-patch-name fp))
                             (splice::fn-patch-old-fn fp)))
@@ -508,10 +489,10 @@ business mutations made during the canary revert by design)."
     (loop for i from 1 to tasks
           do (with-task (:id i :swallow-errors t)
                (process-order (make-instance 'order
-                               :id i :item-count (rng-range rng 1 9)
-                               :unit-price (/ (rng-range rng 100 9999) 100.0)
-                               :discount-code (case (mod (rng-next rng) 5)
-                                                (0 "TEN") (1 "VIP") (t nil))))))))
+                                             :id i :item-count (rng-range rng 1 9)
+                                             :unit-price (/ (rng-range rng 100 9999) 100.0)
+                                             :discount-code (case (mod (rng-next rng) 5)
+                                                              (0 "TEN") (1 "VIP") (t nil))))))))
 
 ;; capture the pristine class shape at load time, after ORDER is defined
 (setf *pristine-order-shape*

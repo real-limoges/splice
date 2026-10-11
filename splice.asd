@@ -1,10 +1,9 @@
-;;;; splice.asd: system definition. SBCL-only (uses sb-mop, sb-thread,
-;;;; sb-introspect); no dependencies outside SBCL contribs.
+;;;; splice.asd: definition file (SBCL only)
 
 (defsystem "splice"
   :description "Safety net for hot-patching a running SBCL image: coherent
 patch sets, SPRT-gated canary rollout, reversible class migration, and a
-hash-chained provenance log."
+hash-chained log."
   :author "splice project"
   :license "MIT"
   :depends-on ("sb-introspect" "sb-bsd-sockets")
@@ -30,6 +29,6 @@ artifacts/criteria-report.md with the measured numbers."
   :depends-on ("splice")
   :components ((:module "test" :components ((:file "criteria"))))
   :perform (test-op (o c)
-             (declare (ignore o c))
-             (unless (uiop:symbol-call :splice-criteria :run-criteria)
-               (error "splice criteria failed; see artifacts/criteria-report.md"))))
+                    (declare (ignore o c))
+                    (unless (uiop:symbol-call :splice-criteria :run-criteria)
+                      (error "splice criteria failed; see artifacts/criteria-report.md"))))

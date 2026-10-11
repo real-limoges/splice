@@ -1,5 +1,4 @@
-;;;; patch.lisp: patch-set declaration, registration (old-world capture,
-;;;; static checks), the contract-check veto gate, and shim construction
+;;;; patch.lisp: patch-set declaration, registration, contracts, and shims.
 
 (in-package #:splice)
 
@@ -70,7 +69,8 @@
 ;;; Static checks that run at registration, veto early
 
 (defun parse-arity (lambda-list)
-  "(values min-args max-args-or-nil). NIL max means &rest/&key."
+  "(values min-args max-args-or-nil). NIL max means &rest/&key.
+This is such a cool use of code as data."
   (let ((min 0) (max 0) (unbounded nil) (state :required))
     (dolist (item lambda-list)
       (case item
@@ -95,11 +95,10 @@
                       (fn-patch-name fp) old-min old-max new-min new-max))))))
 
 (defun check-inlining-hazard (ps fp)
-  "Proclaimed-inline functions have callers that bypass fdefinition
-indirection; a shim would leave stale fast paths."
+  "Callers may have inlined a proclaimed-inline function, bypassing a shim."
   (let ((status (ignore-errors
                  (sb-int:info :function :inlinep (fn-patch-name fp)))))
-    (when (member status '(:inline :maybe-inline))
+    (when (member status '(inline maybe-inline))
       (veto ps :static-inlining
             (format nil "~a is proclaimed ~a; callers may have inlined it"
                     (fn-patch-name fp) status)))))
@@ -111,8 +110,7 @@ indirection; a shim would leave stale fast paths."
                   (fn-patch-name fp)))))
 
 (defun check-overlap (ps)
-  "At most one in-flight canary per function (Erlang's two-version cap,
-generalized): overlapping live sets are vetoed, not stacked."
+  "At most one in-flight canary per function (Erlang's two-version cap)."
   (maphash
    (lambda (other-name other)
      (unless (or (eq other ps)
@@ -137,7 +135,7 @@ generalized): overlapping live sets are vetoed, not stacked."
 
 (defun register-patch-set (ps)
   (setf (gethash (patch-set-name ps) *patch-sets*) ps)
-  ;; static existence + old-world capture first; everything else needs it
+  ;; static existence + old-world capture first; *everything else needs it*
   (dolist (fp (patch-set-fn-patches ps))
     (check-function-exists ps fp)
     (setf (fn-patch-old-fn fp) (fdefinition (fn-patch-name fp))
@@ -199,9 +197,8 @@ generalized): overlapping live sets are vetoed, not stacked."
 ;;; Veto gate between REGISTERED and STAGED
 
 (defun run-contracts (ps &key (phase :pre-flight))
-  "Run every contract; a failure or error signals PATCH-VETOED at pre-flight
-and returns the failing contract at runtime (hard trigger). Returns T when
-all pass."
+  "Run every contract. A failure signals PATCH-VETOED at pre-flight, or
+returns the failing contract's name at runtime. Returns T when all pass."
   (let ((*contract-context* ps))
     (dolist (contract (patch-set-contracts ps) t)
       (multiple-value-bind (ok err)
@@ -223,9 +220,8 @@ all pass."
 ;;; Shims: the per-task routing indirection
 
 (defvar *shim-factories* (make-hash-table :test #'eql)
-  "Fixed-arity shim factories, compiled once per arity. A fixed-arity shim
-avoids &REST/APPLY overhead on the hot path: the difference between ~2x and
-~1.5x call cost during canary (criterion C7).")
+  "Shim factories compiled once per arity. Skipping &REST/APPLY cuts canary
+call cost from ~2x to ~1.5x.")
 
 (defun shim-factory (arity)
   "Compiled factory (ps old new) -> shim taking exactly ARITY arguments."
@@ -236,8 +232,7 @@ avoids &REST/APPLY overhead on the hot path: the difference between ~2x and
               (compile nil
                        `(lambda (ps old new)
                           (lambda ,args
-                            ;; one assoc does route lookup AND marks the
-                            ;; observed route into the pin (coherence trace)
+                            ;; one assoc finds the route and records it
                             (let* ((pin (assoc ps *task-epochs* :test #'eq))
                                    (route (if pin (cadr pin) :old)))
                               (when pin (setf (cddr pin) route))
@@ -254,10 +249,9 @@ avoids &REST/APPLY overhead on the hot path: the difference between ~2x and
                                   (funcall old ,@args))))))))))
 
 (defun make-shim (ps fp)
-  "Dispatch shim for one function: routes on the task's pinned epoch,
-captures anomalies out of new code, optionally falls back to old within the
-same call (paired fallback). Fixed-arity functions get an APPLY-free shim;
-variadic ones fall back to a DYNAMIC-EXTENT &REST version."
+  "Shim routing on the task's pinned epoch, capturing anomalies from new
+code and, with paired fallback, retrying them on old. Variadic functions get
+a slower &REST version."
   (let ((old (fn-patch-old-fn fp))
         (new (fn-patch-new-fn fp)))
     (multiple-value-bind (min max)
@@ -286,8 +280,7 @@ variadic ones fall back to a DYNAMIC-EXTENT &REST version."
             (fdefinition (fn-patch-name fp)) shim))))
 
 (defun remove-fn-shims (ps &key (world :old))
-  "Replace shims destructively with one world: :old restores the captured
-originals (rollback), :new installs the new implementations (promotion)."
+  "Replace shims with one world: :old for rollback, :new for promotion."
   (dolist (fp (patch-set-fn-patches ps))
     (setf (fdefinition (fn-patch-name fp))
           (ecase world
@@ -296,7 +289,7 @@ originals (rollback), :new installs the new implementations (promotion)."
     (setf (fn-patch-shim fp) nil)))
 
 (defun old-method-callable (mp)
-  "A plain function that invokes the captured old method's body."
+  "A function that invokes the captured old method's body."
   (let ((mf (sb-mop:method-function (method-patch-old-method mp))))
     (lambda (&rest args) (funcall mf args nil))))
 

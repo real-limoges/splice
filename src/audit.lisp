@@ -1,8 +1,7 @@
 ;;;; audit.lisp: append-only, hash-chained provenance log.
-;;;; One readably-printed plist per line; each entry carries the SHA-256 of
-;;;; the previous entry's line text. The log alone reconstructs the image's
-;;;; expected code state (RECONSTRUCT-STATE); LIFECYCLE.LISP provides the
-;;;; live-image comparison half (VERIFY-RECONSTRUCTION).
+;;;; One plist per line, each carrying the SHA-256 of the previous line.
+;;;; RECONSTRUCT-STATE rebuilds expected code state from the log alone;
+;;;; VERIFY-RECONSTRUCTION (lifecycle.lisp) compares it to the live image.
 
 (in-package #:splice)
 
@@ -13,8 +12,7 @@
 
 (defstruct (audit-log (:constructor %make-audit-log))
   path stream (seq 0) (prev-hash "genesis") (lock (sb-thread:make-mutex))
-  ;; bounded in-memory tail (newest first) for cheap recent-entry queries;
-  ;; the file is the source of truth
+  ;; bounded in-memory tail, newest first; the file is the source of truth
   (lines '()) (lines-count 0))
 
 (defvar *audit-log* nil "The active audit log, or NIL for none.")
@@ -81,10 +79,9 @@ Returns the entry's sequence number, or NIL when no log is open."
 ;;; Offline: chain verification and state reconstruction
 
 (defun map-audit-entries (path fn &key (verify t))
-  "Stream the log at PATH through FN (called with each parsed entry),
-verifying the hash chain along the way. Returns (values ok count
-break-seq). Streaming: multi-hundred-thousand-entry logs must not be
-resident all at once."
+  "Call FN on each entry of the log at PATH, verifying the hash chain.
+Returns (values ok count break-seq). Streams, so large logs never sit in
+memory."
   (with-open-file (in path)
     (let ((*read-eval* nil)
           (*package* (find-package :splice))
@@ -104,8 +101,7 @@ resident all at once."
 
 (defun verify-audit-chain (path)
   "Verify the hash chain of the log at PATH. Returns (values ok entry-count
-break-seq): OK is T when intact; BREAK-SEQ is the seq of the first entry
-whose :prev-hash does not match, or NIL."
+break-seq), where BREAK-SEQ is the first entry whose :prev-hash mismatches."
   (map-audit-entries path nil))
 
 (defun reconstruct-state (path)
