@@ -105,8 +105,10 @@
              (format nil "~a/~a" (getf cmp :snapshot-restored)
                      (getf cmp :snapshot-total))))
     (let ((rev (first (session-result-reversal-report r))))
+      ;; a report exists only when every instance reversed: the first
+      ;; failure aborts the rollback and freezes the set
       (check "Flagship: reverse migration completed without failures"
-             (and rev (zerop (getf rev :failed)))
+             (and rev t)
              rev)
       (check "Flagship: journal-exact restorations occurred (instances were
 migrated forward mid-canary, then restored)"

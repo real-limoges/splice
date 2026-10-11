@@ -104,53 +104,96 @@ memory."
 break-seq), where BREAK-SEQ is the first entry whose :prev-hash mismatches."
   (map-audit-entries path nil))
 
+;;; Reconstruction state is a plist of four alists, each newest first:
+;;; :functions (name . impl), :classes (name . shape), :sets (name . state),
+;;; and :members (set-name . (:functions fs :classes cs)) from registration.
+;;; Every function below returns a new state and leaves its argument alone.
+
+(defun empty-reconstruction ()
+  (list :functions '() :classes '() :sets '() :members '()))
+
+(defun replace-entry (alist name value)
+  "ALIST with NAME's entry replaced by (NAME . VALUE) at the front."
+  (acons name value (remove name alist :key #'car)))
+
+(defun update-field (state key fn)
+  "STATE with KEY's value replaced by FN applied to it."
+  (let ((copy (copy-list state)))
+    (setf (getf copy key) (funcall fn (getf state key)))
+    copy))
+
+(defun update-set-state (state set-name set-state)
+  "STATE with patch set SET-NAME moved to SET-STATE."
+  (update-field state :sets
+                (lambda (sets) (replace-entry sets set-name set-state))))
+
+(defun register-members (state set-name functions classes)
+  "STATE with SET-NAME's registered FUNCTIONS and CLASSES recorded."
+  (update-field state :members
+                (lambda (members)
+                  (acons set-name (list :functions functions :classes classes)
+                         members))))
+
+(defun patch-set-members (state set-name)
+  (cdr (assoc set-name (getf state :members))))
+
+(defun retarget-set (state set-name set-state impl shape)
+  "STATE with SET-NAME moved to SET-STATE, each of its functions pointing at
+IMPL and each of its classes at SHAPE."
+  (let ((members (patch-set-members state set-name)))
+    (update-field
+     (update-field (update-set-state state set-name set-state)
+                   :functions
+                   (lambda (functions)
+                     (reduce (lambda (acc f) (replace-entry acc (getf f :name) impl))
+                             (getf members :functions)
+                             :initial-value functions)))
+     :classes
+     (lambda (classes)
+       (reduce (lambda (acc c) (replace-entry acc c shape))
+               (getf members :classes)
+               :initial-value classes)))))
+
+(defun apply-audit-entry (state entry)
+  "STATE after folding in one audit log ENTRY. Events that do not move code
+state return STATE unchanged."
+  (let ((set-name (getf entry :patch-set)))
+    (case (getf entry :event)
+      (:patch-registered
+       (update-set-state (register-members state set-name
+                                           (getf entry :functions)
+                                           (getf entry :classes))
+                         set-name :registered))
+      (:contract-result
+       (if (eq (getf entry :verdict) :veto)
+           (update-set-state state set-name :vetoed)
+           state))
+      (:install
+       (retarget-set state set-name :staged :shimmed :union))
+      (:canary-transition
+       (update-set-state state set-name (getf entry :to)))
+      (:promotion
+       (retarget-set state set-name :promoted (list :new set-name) :new))
+      (:rollback-complete
+       (retarget-set state set-name :rolled-back :original :original))
+      (:freeze
+       (update-set-state state set-name :frozen))
+      (t state))))
+
 (defun reconstruct-state (path)
   "Fold over the audit log to derive the image's expected code state.
 Returns a plist: (:functions alist(name . impl) :classes alist(name . shape)
 :sets alist(name . final-state)) where IMPL is :original, :shimmed, or
 (:new set-name), and SHAPE is :original, :union, or :new."
-  (let ((functions '()) (classes '()) (sets '()) (members '()))
-      (flet ((set-impl (name impl)
-               (setf functions (acons name impl (remove name functions :key #'car))))
-             (set-shape (name shape)
-               (setf classes (acons name shape (remove name classes :key #'car))))
-             (set-state (name state)
-               (setf sets (acons name state (remove name sets :key #'car)))))
-        (flet ((fold (entry)
-          (let ((set-name (getf entry :patch-set)))
-            (case (getf entry :event)
-              (:patch-registered
-               (setf members (acons set-name
-                                    (list :functions (getf entry :functions)
-                                          :classes (getf entry :classes))
-                                    members))
-               (set-state set-name :registered))
-              (:contract-result
-               (when (eq (getf entry :verdict) :veto) (set-state set-name :vetoed)))
-              (:install
-               (set-state set-name :staged)
-               (dolist (f (getf (cdr (assoc set-name members)) :functions))
-                 (set-impl (getf f :name) :shimmed))
-               (dolist (c (getf (cdr (assoc set-name members)) :classes))
-                 (set-shape c :union)))
-              (:canary-transition (set-state set-name (getf entry :to)))
-              (:promotion
-               (set-state set-name :promoted)
-               (dolist (f (getf (cdr (assoc set-name members)) :functions))
-                 (set-impl (getf f :name) (list :new set-name)))
-               (dolist (c (getf (cdr (assoc set-name members)) :classes))
-                 (set-shape c :new)))
-              (:rollback-complete
-               (set-state set-name :rolled-back)
-               (dolist (f (getf (cdr (assoc set-name members)) :functions))
-                 (set-impl (getf f :name) :original))
-               (dolist (c (getf (cdr (assoc set-name members)) :classes))
-                 (set-shape c :original)))
-              (:freeze (set-state set-name :frozen))))))
-          (multiple-value-bind (ok count break-seq)
-              (map-audit-entries path #'fold)
-            (declare (ignore count))
-            (unless ok
-              (error "audit chain broken at seq ~a; refusing to reconstruct"
-                     break-seq)))))
-    (list :functions functions :classes classes :sets sets)))
+  (let ((state (empty-reconstruction)))
+    ;; MAP-AUDIT-ENTRIES streams for effect, so the fold threads STATE here
+    (multiple-value-bind (ok count break-seq)
+        (map-audit-entries path (lambda (entry)
+                                  (setf state (apply-audit-entry state entry))))
+      (declare (ignore count))
+      (unless ok
+        (error "audit chain broken at seq ~a; refusing to reconstruct"
+               break-seq)))
+    (list :functions (getf state :functions)
+          :classes (getf state :classes)
+          :sets (getf state :sets))))

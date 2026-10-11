@@ -235,50 +235,55 @@ the count touched."
       (touch-instance inst))
     (length instances)))
 
+(defun instances-to-reverse (class-name)
+  "Every journaled or canary-tracked instance of CLASS-NAME, as
+(instance . kind) where KIND is :journaled, :canary-born, or :old-born.
+An instance in both tables is listed once, as :journaled."
+  (sb-thread:with-mutex (*migration-lock*)
+    (let ((journaled '()) (born '()))
+      (maphash (lambda (inst record)
+                 (when (eq (getf record :set) class-name)
+                   (push (cons inst :journaled) journaled)))
+               *migration-journal*)
+      (maphash (lambda (inst birth)
+                 (when (and (eq (car birth) class-name)
+                            (not (assoc inst journaled :test #'eq)))
+                   (push (cons inst (if (eq (cdr birth) :old)
+                                        :old-born :canary-born))
+                         born)))
+               *canary-population*)
+      (append born journaled))))
+
+(defun reversal-counts (instances)
+  "How many of INSTANCES were reversed each way."
+  (flet ((count-kind (kind) (count kind instances :key #'cdr)))
+    (list :journal-exact (count-kind :journaled)
+          :synthesized (count-kind :canary-born)
+          :old-born-unchanged (count-kind :old-born))))
+
 (defun rollback-class-patch (ps cp)
   "Revert the class, then touch every journaled or canary-born instance so
-the counts are deterministic. Returns the report plist."
-  (let ((class-name (class-patch-class-name cp))
-        (exact 0) (synthesized 0) (old-born 0) (failed 0))
+the counts are deterministic. The first instance that fails to migrate back
+aborts the rollback. Returns the report plist."
+  (let ((class-name (class-patch-class-name cp)))
     (setf (gethash class-name *migration-registry*) (cons cp :backward))
     (apply-class-shape class-name
                        (class-patch-old-slot-specs cp)
                        (class-patch-old-superclass-names cp))
-    ;; each touch lands in MIGRATE-INSTANCE-BACKWARD
-    (let ((instances '()))
-      (sb-thread:with-mutex (*migration-lock*)
-        (maphash (lambda (inst record)
-                   (when (eq (getf record :set) class-name)
-                     (push (cons inst :journaled) instances)))
-                 *migration-journal*)
-        (maphash (lambda (inst birth)
-                   (when (and (eq (car birth) class-name)
-                              (not (assoc inst instances :test #'eq)))
-                     (push (cons inst (if (eq (cdr birth) :old)
-                                          :old-born :canary-born))
-                           instances)))
-                 *canary-population*))
+    (let ((instances (instances-to-reverse class-name)))
+      ;; each touch lands in MIGRATE-INSTANCE-BACKWARD
       (dolist (entry instances)
-        (handler-case
-            (progn
-              (touch-instance (car entry))
-              (ecase (cdr entry)
-                (:journaled (incf exact))
-                (:canary-born (incf synthesized))
-                (:old-born (incf old-born))))
+        (handler-case (touch-instance (car entry))
           (migration-failure (e)
-            (incf failed)
-            (error 'rollback-failure :patch-set ps :cause e)))))
-    (remhash class-name *migration-registry*)
-    (remhash class-name *tracked-classes*)
-    (purge-class-tracking class-name)
-    (audit :class-shape :class class-name :shape :original
-                        :patch-set (patch-set-name ps)
-                        :reversal-counts (list :journal-exact exact
-                                               :synthesized synthesized
-                                               :old-born-unchanged old-born :failed failed))
-    (list :journal-exact exact :synthesized synthesized
-          :old-born-unchanged old-born :failed failed)))
+            (error 'rollback-failure :patch-set ps :cause e))))
+      (remhash class-name *migration-registry*)
+      (remhash class-name *tracked-classes*)
+      (purge-class-tracking class-name)
+      (let ((report (reversal-counts instances)))
+        (audit :class-shape :class class-name :shape :original
+                            :patch-set (patch-set-name ps)
+                            :reversal-counts report)
+        report))))
 
 (defun promote-class-patch (ps cp)
   "Apply the final shape (dropped slots physically removed)."

@@ -242,95 +242,117 @@ the conductor every 200 tasks."
 when the summed member LLRs cross the Wald upper bound or any member rolls
 back locally. Returns the final reports."
   (splice:open-audit-log log-path)
-  (let* ((spec (currency-patch-spec))
-         (upper (log (/ (- 1d0 beta) alpha)))
-         (members (mapcar (lambda (m)
-                            (destructuring-bind (host port &key fault) m
-                              (let ((ms (connect-member host port)))
-                                (setf (getf (member-state-final ms) :fault) fault)
-                                ms)))
-                          members-spec))
-         (mailbox '()) (mailbox-lock (sb-thread:make-mutex)))
-    (splice:audit :cluster-prepare :members (mapcar #'second members-spec)
-                  :spec-hash (getf spec :hash))
-    ;; PREPARE on every member; any veto aborts the cluster
-    (loop for ms in members
-          for (nil nil . opts) in members-spec
-          do (send-form (member-state-stream ms)
-                        (list :prepare :spec spec :fault (getf opts :fault)))
-             (let ((reply (read-form (member-state-stream ms))))
-               (unless (eq (first reply) :prepared)
-                 (splice:audit :cluster-abort :reason reply)
-                 (error "member ~a vetoed prepare: ~a"
-                        (member-state-port ms) reply))))
-    ;; COMMIT everywhere; then reader threads feed the mailbox
-    (dolist (ms members)
-      (send-form (member-state-stream ms) '(:commit))
-      (let ((reply (read-form (member-state-stream ms))))
-        (unless (eq (first reply) :committed)
-          (error "member ~a failed commit: ~a" (member-state-port ms) reply))))
-    (splice:audit :cluster-commit :members (mapcar #'member-state-port members))
-    (dolist (ms members)
-      (setf (member-state-thread ms)
-            (sb-thread:make-thread
-             (lambda ()
-               (loop for msg = (ignore-errors (read-form (member-state-stream ms)))
-                     until (or (null msg) (eq msg :eof))
-                     do (sb-thread:with-mutex (mailbox-lock)
-                          (push (cons ms msg) mailbox))
-                     until (eq (first msg) :terminal)))
-             :name (format nil "conductor-reader-~a" (member-state-port ms)))))
-    ;; aggregation loop
-    (let ((rollback-sent nil))
-      (loop
-        (sleep 0.05)
-        (let ((msgs (sb-thread:with-mutex (mailbox-lock)
-                      (prog1 (reverse mailbox) (setf mailbox '())))))
-          (dolist (entry msgs)
-            (destructuring-bind (ms . msg) entry
-              (case (first msg)
-                (:health
-                 (destructuring-bind (&key state fraction n llr) (rest msg)
-                   (declare (ignore fraction))
-                   (setf (member-state-latest-llr ms) llr
-                         (member-state-latest-n ms) n
-                         (member-state-state ms) state)))
-                (:terminal
-                 (setf (member-state-terminal ms) (getf (rest msg) :state)
-                       (member-state-state ms) (getf (rest msg) :state))))))
-          ;; pooled verdict: per-node LLRs add
-          (let ((pooled (reduce #'+ members :key #'member-state-latest-llr))
-                (local-reject (find :rolled-back members
-                                    :key #'member-state-terminal))
-                (local-rolling (find :rolling-back members
-                                     :key #'member-state-state)))
-            (when (and (not rollback-sent)
-                       (or local-reject local-rolling (>= pooled upper)))
-              (setf rollback-sent t)
-              (splice:audit :cluster-rollback
-                            :pooled-llr (float pooled 1.0) :upper (float upper 1.0)
-                            :trigger (cond (local-reject :member-local-reject)
-                                           (local-rolling :member-local-reject)
-                                           (t :pooled-sprt-reject)))
-              (dolist (ms members)
-                (ignore-errors (send-form (member-state-stream ms) '(:rollback))))))
-          (when (every #'member-state-terminal members)
-            (return)))))
-    ;; collect final reports and reconcile
-    (let ((finals
-            (mapcar (lambda (ms)
-                      (ignore-errors (sb-thread:join-thread (member-state-thread ms)))
-                      (send-form (member-state-stream ms) '(:report))
-                      (let ((final (loop for msg = (read-form (member-state-stream ms))
-                                         when (eq msg :eof) return msg
-                                         when (eq (first msg) :final) return msg)))
-                        (ignore-errors
-                         (send-form (member-state-stream ms) '(:bye)))
-                        (ignore-errors (close (member-state-stream ms)))
-                        (if (eq final :eof)
-                            (list :port (member-state-port ms) :state :died)
-                            (list* :port (member-state-port ms) (rest final)))))
-                    members)))
+  (let ((spec (currency-patch-spec))
+        (members (mapcar (lambda (m)
+                           (destructuring-bind (host port &key fault) m
+                             (let ((ms (connect-member host port)))
+                               (setf (getf (member-state-final ms) :fault) fault)
+                               ms)))
+                         members-spec))
+        (mailbox (make-mailbox)))
+    (prepare-members members members-spec spec)
+    (commit-members members)
+    (start-member-readers members mailbox)
+    (await-cluster-verdict members mailbox (log (/ (- 1d0 beta) alpha)))
+    (let ((finals (collect-final-reports members)))
       (splice:audit :cluster-final :reports finals)
       (splice:close-audit-log)
       finals)))
+
+;;; Messages from the reader threads, drained by the aggregation loop.
+(defstruct mailbox (messages '()) (lock (sb-thread:make-mutex)))
+
+(defun prepare-members (members members-spec spec)
+  "PREPARE on every member; any veto aborts the cluster."
+  (splice:audit :cluster-prepare :members (mapcar #'second members-spec)
+                :spec-hash (getf spec :hash))
+  (loop for ms in members
+        for (nil nil . opts) in members-spec
+        do (send-form (member-state-stream ms)
+                      (list :prepare :spec spec :fault (getf opts :fault)))
+           (let ((reply (read-form (member-state-stream ms))))
+             (unless (eq (first reply) :prepared)
+               (splice:audit :cluster-abort :reason reply)
+               (error "member ~a vetoed prepare: ~a"
+                      (member-state-port ms) reply)))))
+
+(defun commit-members (members)
+  "COMMIT everywhere, starting each member's local canary."
+  (dolist (ms members)
+    (send-form (member-state-stream ms) '(:commit))
+    (let ((reply (read-form (member-state-stream ms))))
+      (unless (eq (first reply) :committed)
+        (error "member ~a failed commit: ~a" (member-state-port ms) reply))))
+  (splice:audit :cluster-commit :members (mapcar #'member-state-port members)))
+
+(defun start-member-readers (members mailbox)
+  "One thread per member, posting (member . message) to MAILBOX until that
+member reports a terminal state or its stream closes."
+  (dolist (ms members)
+    (setf (member-state-thread ms)
+          (sb-thread:make-thread
+           (lambda ()
+             (loop for msg = (ignore-errors (read-form (member-state-stream ms)))
+                   until (or (null msg) (eq msg :eof))
+                   do (sb-thread:with-mutex ((mailbox-lock mailbox))
+                        (push (cons ms msg) (mailbox-messages mailbox)))
+                   until (eq (first msg) :terminal)))
+           :name (format nil "conductor-reader-~a" (member-state-port ms))))))
+
+(defun await-cluster-verdict (members mailbox upper)
+  "Fold member messages into MEMBERS until every member is terminal.
+Broadcasts rollback once, on a local reject or when the pooled LLR crosses
+UPPER."
+  (let ((rollback-sent nil))
+    (loop
+      (sleep 0.05)
+      (let ((msgs (sb-thread:with-mutex ((mailbox-lock mailbox))
+                    (prog1 (reverse (mailbox-messages mailbox))
+                      (setf (mailbox-messages mailbox) '())))))
+        (dolist (entry msgs)
+          (destructuring-bind (ms . msg) entry
+            (case (first msg)
+              (:health
+               (destructuring-bind (&key state fraction n llr) (rest msg)
+                 (declare (ignore fraction))
+                 (setf (member-state-latest-llr ms) llr
+                       (member-state-latest-n ms) n
+                       (member-state-state ms) state)))
+              (:terminal
+               (setf (member-state-terminal ms) (getf (rest msg) :state)
+                     (member-state-state ms) (getf (rest msg) :state))))))
+        ;; pooled verdict: per-node LLRs add
+        (let ((pooled (reduce #'+ members :key #'member-state-latest-llr))
+              (local-reject (find :rolled-back members
+                                  :key #'member-state-terminal))
+              (local-rolling (find :rolling-back members
+                                   :key #'member-state-state)))
+          (when (and (not rollback-sent)
+                     (or local-reject local-rolling (>= pooled upper)))
+            (setf rollback-sent t)
+            (splice:audit :cluster-rollback
+                          :pooled-llr (float pooled 1.0) :upper (float upper 1.0)
+                          :trigger (cond (local-reject :member-local-reject)
+                                         (local-rolling :member-local-reject)
+                                         (t :pooled-sprt-reject)))
+            (dolist (ms members)
+              (ignore-errors (send-form (member-state-stream ms) '(:rollback))))))
+        (when (every #'member-state-terminal members)
+          (return))))))
+
+(defun collect-final-reports (members)
+  "Ask each member for its final report and close the connection. A member
+whose stream ended reports :state :died."
+  (mapcar (lambda (ms)
+            (ignore-errors (sb-thread:join-thread (member-state-thread ms)))
+            (send-form (member-state-stream ms) '(:report))
+            (let ((final (loop for msg = (read-form (member-state-stream ms))
+                               when (eq msg :eof) return msg
+                               when (eq (first msg) :final) return msg)))
+              (ignore-errors
+               (send-form (member-state-stream ms) '(:bye)))
+              (ignore-errors (close (member-state-stream ms)))
+              (if (eq final :eof)
+                  (list :port (member-state-port ms) :state :died)
+                  (list* :port (member-state-port ms) (rest final)))))
+          members))
