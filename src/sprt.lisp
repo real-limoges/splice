@@ -2,9 +2,9 @@
 ;;;; One instance per (patch-set stage signal-stream).
 ;;;; H0: p = p0 (healthy, tracked from the control arm),
 ;;;; H1: p = p1 = max(c*p0, p0+delta).
-;;;; "Accept H0" is Wald's term, since beta bounds the false-accept rate.
-;;;; It's relative to p1: so it means "closer to p0 than to p1",
-;;;; not "p is p0". The true p between p0 and p1 can end at either boundary.
+;;;; "Accept H0" is Wald's term (beta bounds the false-accept rate) and
+;;;; means "closer to p0 than to p1", not "p is p0": a true p between p0
+;;;; and p1 can end at either boundary.
 ;;;; Thresholds carry Wald's alpha/beta bounds. Statistics reset at each ramp
 ;;;; stage. A lucky 5% stage must not subsidize a bad 25% stage.
 

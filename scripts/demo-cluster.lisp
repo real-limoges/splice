@@ -1,11 +1,12 @@
-;;;; demo-cluster.lisp: cluster propagation prototype exercised against two real SBCL images.
+;;;; demo-cluster.lisp: cluster propagation prototype, exercised against
+;;;; two real SBCL images.
 ;;;;
 ;;;;   sbcl --non-interactive --load scripts/demo-cluster.lisp
 ;;;;
 ;;;; Spawns two member SBCL processes, ships them the currency patch set as
 ;;;; source (two-phase prepare/commit, hash-verified), injects the latent
-;;;; fault on member B only, and lets the conductor's pooled-SPRT/local-
-;;;; reject aggregation roll back BOTH members.
+;;;; fault on the member at port 7802 only, and lets the conductor's
+;;;; pooled-SPRT/local-reject aggregation roll back both members.
 
 (require :asdf)
 (asdf:load-asd (merge-pathnames "../splice.asd" *load-truename*))

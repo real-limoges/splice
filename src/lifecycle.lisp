@@ -150,7 +150,7 @@ transition. Returns the action taken: :continue when nothing changed, else
                                  :n (sprt-n sprt) :llr (sprt-llr sprt))
          (initiate-rollback-locked
           ps (list :sprt-reject (sprt-snapshot sprt stream)))))
-      ;; stage advances only when BOTH streams accept health
+      ;; stage advances only when both streams accept health
       ((and (eq err-verdict :accept) (eq lat-verdict :accept))
        (signal 'canary-verdict :patch-set ps :stream-kind :both
                                :direction :accept
@@ -340,7 +340,7 @@ Every resolution is audited with the operator's identity."
         (sleep 0.01)))))
 
 ;;; ---------------------------------------------------------------------
-;;; Audit-log reconstruction vs. the live image (criterion C5)
+;;; Audit-log reconstruction vs. the live image
 
 (defun expected-function-object (name impl)
   "The function object the log says should be installed at NAME."
