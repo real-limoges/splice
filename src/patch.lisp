@@ -135,7 +135,7 @@ This is such a cool use of code as data."
 
 (defun register-patch-set (ps)
   (setf (gethash (patch-set-name ps) *patch-sets*) ps)
-  ;; static existence + old-world capture first; *everything else needs it*
+  ;; static existence + old-world capture first; everything else needs it
   (dolist (fp (patch-set-fn-patches ps))
     (check-function-exists ps fp)
     (setf (fn-patch-old-fn fp) (fdefinition (fn-patch-name fp))

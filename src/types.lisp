@@ -1,4 +1,5 @@
-;;;; types.lisp
+;;;; types.lisp: patch-set structs, the registry, and lifecycle-state
+;;;; predicates.
 
 (in-package #:splice)
 

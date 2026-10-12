@@ -1,16 +1,20 @@
-;;;; demo.lisp: the full splice cycle, narrated.
+;;;; demo.lisp: splice a patch set in, splice one back out, trace both.
 ;;;;
 ;;;;   sbcl --non-interactive --load scripts/demo.lisp
 ;;;;
-;;;; Act I:  a clean patch set (3 interdependent functions + a method + a
-;;;;         class redefinition) rides the 5% -> 25% -> 100% ramp and is
-;;;;         promoted.
-;;;; Act II: the same patch set with a latent fault (fails only for VIP
-;;;;         orders) is caught by the SPRT mid-ramp and fully reverted,
-;;;;         including reverse migration of every instance that had already
-;;;;         been migrated forward.
-;;;; Act III: the audit log's hash chain is verified, the image state is
-;;;;         reconstructed from the log alone, and tampering is detected.
+;;;; Runs three scenarios in order, each building on the image state the
+;;;; previous one left behind:
+;;;;
+;;;;   1. Splice in. A clean patch set (3 interdependent functions + a
+;;;;      method + a class redefinition) rides the 5% -> 25% -> 100% ramp
+;;;;      and is promoted.
+;;;;   2. Splice out. The same patch set with a fault that fires only for
+;;;;      VIP orders is caught by the SPRT mid-ramp and fully reverted,
+;;;;      including reverse migration of every instance that had already
+;;;;      been migrated forward.
+;;;;   3. Trace the splices. The audit log's hash chain is verified, the image
+;;;;      state is reconstructed from the log alone, and tampering is
+;;;;      detected.
 
 (require :asdf)
 (asdf:load-asd (merge-pathnames "../splice.asd" *load-truename*))
@@ -30,7 +34,7 @@
 (format t "~%splice demo, audit log: ~a~%" *log-path*)
 
 ;;; --------------------------------------------------------------------
-(headline "ACT I. Clean patch: canary ramp 5% -> 25% -> 100% -> promoted")
+(headline "1. Splice in: clean patch, canary ramp 5% -> 25% -> 100% -> promoted")
 
 (let ((r (run-canary-session :fault nil :seed 1001 :quiet t)))
   (format t "final state: ~a after ~a tasks~%"
@@ -48,7 +52,7 @@
               (order-cents o)))))
 
 ;;; --------------------------------------------------------------------
-(headline "ACT II. Latent fault: caught mid-ramp, fully reverted")
+(headline "2. Splice out: latent fault caught mid-ramp, fully reverted")
 
 (format t "fault: ~a~%~%" (fault-description :latent))
 (let ((r (run-canary-session :fault :latent :seed 2002 :quiet t)))
@@ -75,7 +79,7 @@ class has no minor-units slot: ~a)~%"
             (not (slot-exists-p o 'splice/harness::amount-minor-units)))))
 
 ;;; --------------------------------------------------------------------
-(headline "ACT III. The audit log is the source of truth")
+(headline "3. Trace the splices: the audit log is the source of truth")
 
 (close-audit-log)
 

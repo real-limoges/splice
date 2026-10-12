@@ -20,7 +20,7 @@
    #:make-sprt #:sprt-observe #:sprt-verdict #:sprt-llr #:sprt-n
    #:sprt-upper #:sprt-lower
 
-   ;; outcome reporting (harness → evaluator)
+   ;; outcome reporting (harness -> evaluator)
    #:report-outcome
 
    ;; class migration
