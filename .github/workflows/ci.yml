@@ -1,0 +1,63 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  criteria:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # apt ships an older SBCL (2.2.x), the version the prototype was built on.
+          # SBCL 2.2.9 weak hash tables corrupt ("Corrupt NEXT-chain") under GC
+          # pressure and concurrency, even when mutex-guarded. The migration
+          # journal avoids them (strong keys, explicit purging), so a failure
+          # here alone may mean weak tables crept back in.
+          - os: ubuntu-latest
+            install: sudo apt-get update && sudo apt-get install -y sbcl
+          # Homebrew tracks current SBCL, matching local development.
+          - os: macos-latest
+            install: brew install sbcl
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SBCL
+        run: ${{ matrix.install }}
+
+      - name: SBCL version
+        run: sbcl --version
+
+      # The demo rewrites artifacts/demo-audit.log, which is tracked. That is
+      # harmless in a throwaway checkout, but a step added later that checks for
+      # a clean tree has to run before this one or restore the file.
+      - name: Demo
+        run: sbcl --non-interactive --load scripts/demo.lisp
+
+      # SPLICE_RUNS=20 is the quick run (about 15 seconds locally); drop it for
+      # the full 100 per fault class (about 2 to 4 minutes).
+      #
+      # C7 is a timing check: the canary shim must cost under 2x a plain call
+      # (1.37x locally). Shared runners are noisy, so it is the likeliest flake.
+      # If it fails intermittently, loosen the threshold for CI rather than
+      # changing the code.
+      - name: Criteria
+        env:
+          SPLICE_RUNS: "20"
+        run: >
+          sbcl --non-interactive
+          --eval '(require :asdf)'
+          --eval '(asdf:load-asd (truename "splice.asd"))'
+          --eval '(asdf:test-system "splice")'
+
+      - name: Upload criteria report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: criteria-report-${{ matrix.os }}
+          path: artifacts/criteria-report.md
+          if-no-files-found: ignore
