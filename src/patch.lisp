@@ -293,6 +293,13 @@ a slower &REST version."
   (let ((mf (sb-mop:method-function (method-patch-old-method mp))))
     (lambda (&rest args) (funcall mf args nil))))
 
+(defun eval-method-redefinition (form)
+  "Evaluate a DEFMETHOD FORM that replaces an existing method on purpose.
+SBCL warns on every such redefinition; here it is the intended effect, so
+only that warning is muffled."
+  (handler-bind ((sb-kernel:redefinition-with-defmethod #'muffle-warning))
+    (eval form)))
+
 (defun install-method-shims (ps)
   (dolist (mp (patch-set-method-patches ps))
     (let* ((old-callable (old-method-callable mp))
@@ -310,7 +317,7 @@ a slower &REST version."
                                            (lambda (e) (note-anomaly ,ps e))))
                             (funcall ,new-fn ,@arg-names))
                           (funcall ,old-callable ,@arg-names))))))
-      (setf (method-patch-shim-method mp) (eval form)))))
+      (setf (method-patch-shim-method mp) (eval-method-redefinition form)))))
 
 (defun remove-method-shims (ps &key (world :old))
   (dolist (mp (patch-set-method-patches ps))
@@ -325,7 +332,8 @@ a slower &REST version."
                                   below (length (method-patch-specializer-names mp))
                                 collect (intern (format nil "A~d" i) :splice)))
                (new-fn (method-patch-new-fn mp)))
-           (eval `(defmethod ,(method-patch-gf-name mp)
-                      ,(mapcar #'list arg-names
-                        (method-patch-specializer-names mp))
-                    (funcall ,new-fn ,@arg-names)))))))))
+           (eval-method-redefinition
+            `(defmethod ,(method-patch-gf-name mp)
+                 ,(mapcar #'list arg-names
+                   (method-patch-specializer-names mp))
+               (funcall ,new-fn ,@arg-names)))))))))

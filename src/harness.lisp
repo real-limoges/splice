@@ -311,8 +311,9 @@ serves every session."
   (destructuring-bind (slots supers) *pristine-order-shape*
     (splice::apply-class-shape 'order slots supers))
   ;; restore the original print-total method if a promoted shim replaced it
-  (eval '(defmethod print-total ((order order) (stream stream))
-          (format stream "$~,2f" (order-float-total order))))
+  (splice::eval-method-redefinition
+   '(defmethod print-total ((order order) (stream stream))
+     (format stream "$~,2f" (order-float-total order))))
   (unregister-patch-set 'currency-migration)
   (clrhash splice::*migration-registry*)
   (clrhash splice::*tracked-classes*)
