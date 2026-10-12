@@ -11,17 +11,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # apt ships an older SBCL (2.2.x), the version the prototype was built on.
+          # apt on 24.04 ships an older SBCL (2.2.x), the version the prototype
+          # was built on. The runner is pinned because ubuntu-latest moving to a
+          # newer release would quietly change which SBCL this job tests.
           # SBCL 2.2.9 weak hash tables corrupt ("Corrupt NEXT-chain") under GC
           # pressure and concurrency, even when mutex-guarded. The migration
           # journal avoids them (strong keys, explicit purging), so a failure
           # here alone may mean weak tables crept back in.
-          - os: ubuntu-latest
+          - name: sbcl-2.2-ubuntu-24.04
+            container: ""
             install: sudo apt-get update && sudo apt-get install -y sbcl
-          # Homebrew tracks current SBCL, matching local development.
-          - os: macos-latest
-            install: brew install sbcl
-    runs-on: ${{ matrix.os }}
+          # Arch tracks current SBCL, matching local development. The version
+          # floats with Arch; the SBCL version step records which one ran.
+          # The container runs as root, so no sudo.
+          - name: sbcl-current-arch
+            container: archlinux:latest
+            install: pacman -Syu --noconfirm sbcl
+    name: criteria (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.container }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -58,6 +66,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: criteria-report-${{ matrix.os }}
+          name: criteria-report-${{ matrix.name }}
           path: artifacts/criteria-report.md
           if-no-files-found: ignore
