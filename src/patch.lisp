@@ -220,60 +220,98 @@ returns the failing contract's name at runtime. Returns T when all pass."
                 (return-from run-contracts (contract-name contract)))))))))
 
 ;;; Shims: the per-task routing indirection
+;;;
+;;; Every shim asks which route its task is pinned to, then either calls old
+;;; code or calls new code with its errors noted as canary anomalies. The
+;;; three kinds of shim differ only in how they pass arguments, so the shared
+;;; steps are ordinary functions and the generated code forwards to them.
+
+(defun arg-names (n)
+  "Argument symbols A0 to An-1, for generated lambdas and methods."
+  (loop for i below n collect (intern (format nil "A~d" i) :splice)))
+
+(declaim (inline record-pinned-route))
+(defun record-pinned-route (ps)
+  "The task's pinned route for PS, also written onto the pin. :OLD outside a
+task. Inline, since it sits on every fixed-arity shim call."
+  (let ((pin (assoc ps *task-epochs* :test #'eq)))
+    (when pin (setf (cddr pin) (cadr pin)))
+    (if pin (cadr pin) :old)))
+
+(defun traced-route (ps)
+  "The task's pinned route for PS, added to the task's route trace."
+  (let ((route (task-route-for ps)))
+    (note-shim-route ps route)
+    route))
+
+(defun call-new-noting-anomalies (ps run-new)
+  "Call RUN-NEW. An error or storage condition is noted as a canary anomaly
+and keeps unwinding."
+  (handler-bind (((or error storage-condition)
+                   (lambda (e) (note-anomaly ps e))))
+    (funcall run-new)))
+
+(defun call-new-falling-back (ps run-new run-old)
+  "Call RUN-NEW. An error or storage condition is noted as a canary anomaly
+and answered by calling RUN-OLD instead."
+  (handler-case (funcall run-new)
+    ((or error storage-condition) (e)
+      (note-anomaly ps e)
+      (funcall run-old))))
+
+(defun call-new (ps run-new run-old)
+  "Run new code for a function shim, falling back to old code on an error
+when PS has paired fallback."
+  (if (patch-set-paired-fallback ps)
+      (call-new-falling-back ps run-new run-old)
+      (call-new-noting-anomalies ps run-new)))
+
+;;; Function shims
 
 (defvar *shim-factories* (make-hash-table :test #'eql)
   "Shim factories compiled once per arity. Skipping &REST/APPLY cuts canary
 call cost from ~2x to ~1.5x.")
 
+(defun fixed-arity-factory-form (arity)
+  "Source of a factory (ps old new) -> shim taking exactly ARITY arguments.
+The old route is a direct call; closures are built only on the new route."
+  (let ((args (arg-names arity)))
+    `(lambda (ps old new)
+       (lambda ,args
+         (if (eq (record-pinned-route ps) :new)
+             (flet ((run-new () (funcall new ,@args))
+                    (run-old () (funcall old ,@args)))
+               (declare (dynamic-extent #'run-new #'run-old))
+               (call-new ps #'run-new #'run-old))
+             (funcall old ,@args))))))
+
 (defun shim-factory (arity)
-  "Compiled factory (ps old new) -> shim taking exactly ARITY arguments."
+  "The compiled factory for ARITY, compiled on first use."
   (or (gethash arity *shim-factories*)
       (setf (gethash arity *shim-factories*)
-            (let ((args (loop for i below arity
-                              collect (intern (format nil "A~d" i) :splice))))
-              (compile nil
-                       `(lambda (ps old new)
-                          (lambda ,args
-                            ;; one assoc finds the route and records it
-                            (let* ((pin (assoc ps *task-epochs* :test #'eq))
-                                   (route (if pin (cadr pin) :old)))
-                              (when pin (setf (cddr pin) route))
-                              (if (eq route :new)
-                                  (if (patch-set-paired-fallback ps)
-                                      (handler-case (funcall new ,@args)
-                                        ((or error storage-condition) (e)
-                                          (note-anomaly ps e)
-                                          (funcall old ,@args)))
-                                      (handler-bind
-                                          (((or error storage-condition)
-                                             (lambda (e) (note-anomaly ps e))))
-                                        (funcall new ,@args)))
-                                  (funcall old ,@args))))))))))
+            (compile nil (fixed-arity-factory-form arity)))))
+
+(defun variadic-shim (ps old new)
+  "Shim for a function taking optional, rest or keyword arguments. Every
+call goes through &REST and APPLY, so it is slower than a fixed-arity shim."
+  (lambda (&rest args)
+    (declare (dynamic-extent args))
+    (flet ((run-new () (apply new args))
+           (run-old () (apply old args)))
+      (declare (dynamic-extent #'run-new #'run-old))
+      (if (eq (traced-route ps) :new)
+          (call-new ps #'run-new #'run-old)
+          (run-old)))))
 
 (defun make-shim (ps fp)
-  "Shim routing on the task's pinned epoch, capturing anomalies from new
-code and, with paired fallback, retrying them on old. Variadic functions get
-a slower &REST version."
+  "Shim routing FP's function on the task's pinned route."
   (let ((old (fn-patch-old-fn fp))
         (new (fn-patch-new-fn fp)))
     (multiple-value-bind (min max)
         (parse-arity (sb-introspect:function-lambda-list old))
       (if (and max (= min max))
           (funcall (shim-factory min) ps old new)
-          (lambda (&rest args)
-            (declare (dynamic-extent args))
-            (let ((route (task-route-for ps)))
-              (note-shim-route ps route)
-              (if (eq route :new)
-                  (if (patch-set-paired-fallback ps)
-                      (handler-case (apply new args)
-                        ((or error storage-condition) (e)
-                          (note-anomaly ps e)
-                          (apply old args)))
-                      (handler-bind (((or error storage-condition)
-                                       (lambda (e) (note-anomaly ps e))))
-                        (apply new args)))
-                  (apply old args))))))))
+          (variadic-shim ps old new)))))
 
 (defun install-fn-shims (ps)
   (dolist (fp (patch-set-fn-patches ps))
@@ -290,6 +328,8 @@ a slower &REST version."
             (:new (fn-patch-new-fn fp))))
     (setf (fn-patch-shim fp) nil)))
 
+;;; Method shims
+
 (defun old-method-callable (mp)
   "A function that invokes the captured old method's body."
   (let ((mf (sb-mop:method-function (method-patch-old-method mp))))
@@ -302,40 +342,44 @@ only that warning is muffled."
   (handler-bind ((sb-kernel:redefinition-with-defmethod #'muffle-warning))
     (eval form)))
 
+(defun method-lambda-list (mp args)
+  "ARGS paired with MP's specializer class names, for a DEFMETHOD."
+  (mapcar #'list args (method-patch-specializer-names mp)))
+
+(defun method-shim-form (ps mp)
+  "A DEFMETHOD routing MP's method on the task's pinned route. Method shims
+note anomalies from new code but never fall back to old code."
+  (let ((args (arg-names (length (method-patch-specializer-names mp))))
+        (new (method-patch-new-fn mp))
+        (old (old-method-callable mp)))
+    `(defmethod ,(method-patch-gf-name mp) ,(method-lambda-list mp args)
+       (if (eq (traced-route ,ps) :new)
+           (call-new-noting-anomalies ,ps (lambda () (funcall ,new ,@args)))
+           (funcall ,old ,@args)))))
+
+(defun promoted-method-form (mp)
+  "A DEFMETHOD whose body is MP's new code, installed at promotion."
+  (let ((args (arg-names (length (method-patch-specializer-names mp)))))
+    `(defmethod ,(method-patch-gf-name mp) ,(method-lambda-list mp args)
+       (funcall ,(method-patch-new-fn mp) ,@args))))
+
 (defun install-method-shims (ps)
   (dolist (mp (patch-set-method-patches ps))
-    (let* ((old-callable (old-method-callable mp))
-           (new-fn (method-patch-new-fn mp))
-           (arg-names (loop for i from 0
-                              below (length (method-patch-specializer-names mp))
-                            collect (intern (format nil "A~d" i) :splice)))
-           (form `(defmethod ,(method-patch-gf-name mp)
-                      ,(mapcar #'list arg-names
-                        (method-patch-specializer-names mp))
-                    (let ((route (task-route-for ,ps)))
-                      (note-shim-route ,ps route)
-                      (if (eq route :new)
-                          (handler-bind (((or error storage-condition)
-                                           (lambda (e) (note-anomaly ,ps e))))
-                            (funcall ,new-fn ,@arg-names))
-                          (funcall ,old-callable ,@arg-names))))))
-      (setf (method-patch-shim-method mp) (eval-method-redefinition form)))))
+    (setf (method-patch-shim-method mp)
+          (eval-method-redefinition (method-shim-form ps mp)))))
+
+(defun remove-method-shim (mp)
+  "Take MP's routing method off its generic function, if it is on."
+  (when (method-patch-shim-method mp)
+    (remove-method (fdefinition (method-patch-gf-name mp))
+                   (method-patch-shim-method mp))
+    (setf (method-patch-shim-method mp) nil)))
 
 (defun remove-method-shims (ps &key (world :old))
+  "Replace method shims with one world: :old for rollback, :new for promotion."
   (dolist (mp (patch-set-method-patches ps))
-    (let ((gf (fdefinition (method-patch-gf-name mp))))
-      (when (method-patch-shim-method mp)
-        (remove-method gf (method-patch-shim-method mp))
-        (setf (method-patch-shim-method mp) nil))
-      (ecase world
-        (:old (add-method gf (method-patch-old-method mp)))
-        (:new
-         (let ((arg-names (loop for i from 0
-                                  below (length (method-patch-specializer-names mp))
-                                collect (intern (format nil "A~d" i) :splice)))
-               (new-fn (method-patch-new-fn mp)))
-           (eval-method-redefinition
-            `(defmethod ,(method-patch-gf-name mp)
-                 ,(mapcar #'list arg-names
-                   (method-patch-specializer-names mp))
-               (funcall ,new-fn ,@arg-names)))))))))
+    (remove-method-shim mp)
+    (ecase world
+      (:old (add-method (fdefinition (method-patch-gf-name mp))
+                        (method-patch-old-method mp)))
+      (:new (eval-method-redefinition (promoted-method-form mp))))))
