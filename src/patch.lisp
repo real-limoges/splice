@@ -199,7 +199,9 @@ This is such a cool use of code as data."
 (defun run-contracts (ps &key (phase :pre-flight))
   "Run every contract. A failure signals PATCH-VETOED at pre-flight, or
 returns the failing contract's name at runtime. Returns T when all pass."
-  (let ((*contract-context* ps))
+  (let ((*contract-context* ps)
+        (*task-epochs* nil)
+        (*task-shim-routes* nil))
     (dolist (contract (patch-set-contracts ps) t)
       (multiple-value-bind (ok err)
           (ignore-errors (values (funcall (contract-check-fn contract))))

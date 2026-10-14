@@ -104,6 +104,66 @@
     (close-audit-log)))
 
 ;;; ---------------------------------------------------------------------
+;;; Runtime contracts see old code on the old route (own log)
+
+(defun route-probe (x)
+  "Old side of the probe patch: names the code that ran. Call it through its
+symbol: SBCL derives :OLD as the return type of a same-file DEFUN and would
+type-check the shim's :NEW into an error."
+  (declare (ignore x))
+  :old)
+
+(defun join-rollback-thread (ps)
+  "Wait for PS's rollback thread, which audits after its last state change."
+  (let ((name (format nil "splice-rollback-~a" (patch-set-name ps))))
+    (dolist (thread (sb-thread:list-all-threads))
+      (when (equal (sb-thread:thread-name thread) name)
+        (sb-thread:join-thread thread :default nil)))))
+
+(defun check-runtime-contract-routing ()
+  (format t "~%--- runtime contracts call old code through the shims~%")
+  (let* ((log (scratch-file "splice-criteria-runtime-contract.log"))
+         (seen '())
+         (ps (splice::make-patch-set
+              :name 'route-probe-patch
+              :ramp '(50)
+              :runtime-contract-interval 10
+              :fn-patches
+              (list (splice::make-fn-patch
+                     :name 'route-probe
+                     :new-fn (lambda (x) (declare (ignore x)) :new)
+                     :new-source '(route-probe-new)
+                     :new-source-hash (sha256-hex "route-probe-new")))
+              :contracts
+              (list (splice::make-contract
+                     :name 'old-call-reaches-old-code
+                     ;; a plain call is the contract's "old" side; it must
+                     ;; reach old code at pre-flight and at runtime alike
+                     :check-fn (lambda ()
+                                 (let ((ran (funcall 'route-probe 1)))
+                                   (push ran seen)
+                                   (eq ran :old)))
+                     :source '(old-call-reaches-old-code))))))
+    (open-audit-log log)
+    (unregister-patch-set 'route-probe-patch)
+    (register-patch-set ps)
+    (install ps)
+    ;; about half of these route :new; every tenth canary observation runs
+    ;; the contracts from inside that task's cleanup
+    (loop for i from 1 to 60
+          do (with-task (:id i) (funcall 'route-probe i)))
+    (check "Runtime contract: a plain call inside a canary task reaches old code"
+           (and (> (length seen) 1)
+                (every (lambda (ran) (eq ran :old)) seen))
+           (reverse seen))
+    (when (splice::canary-stage-p (patch-set-state ps))
+      (roll-back ps :operator "criteria"))
+    (wait-for-state ps '(:rolled-back :frozen))
+    (join-rollback-thread ps)
+    (unregister-patch-set 'route-probe-patch)
+    (close-audit-log)))
+
+;;; ---------------------------------------------------------------------
 ;;; C4 pre-work: the pristine workload signature, captured before any patch
 
 (defun workload-signature (seed n)
@@ -373,6 +433,7 @@ and the full-log checks run last."
     (format t "~%=== splice criteria runner (~a runs per class) ===~%" *runs*)
     (check-reconstruction-checkpoints)
     (check-resume-after-hard-trigger)
+    (check-runtime-contract-routing)
     (open-audit-log *big-log*)
     (let ((pristine (workload-signature 777 300)))
       (check-flagship)
