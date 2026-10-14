@@ -14,6 +14,50 @@
     (fn-patch-new-fn fp)))
 
 ;;; DEFPATCH-SET: the declaration macro
+;;;
+;;; Each clause kind has a function that turns the clause into the form
+;;; constructing its patch struct; the macro collects them by kind.
+
+(defun source-hash-form (form)
+  "A form computing FORM's source hash at load time."
+  `(sha256-hex (prin1-to-string ',form)))
+
+(defun function-clause-form (fname form)
+  `(make-fn-patch :name ',fname :new-fn ,form :new-source ',form
+                  :new-source-hash ,(source-hash-form form)))
+
+(defun method-clause-form (signature form)
+  (destructuring-bind (gf-name &rest specializers) signature
+    `(make-method-patch :gf-name ',gf-name :specializer-names ',specializers
+                        :new-fn ,form :new-source ',form
+                        :new-source-hash ,(source-hash-form form))))
+
+(defun class-clause-form (cname &key add-slots drop-slots
+                                  migrate-forward migrate-backward lossy)
+  `(make-class-patch :class-name ',cname
+                     :add-slots ',add-slots :drop-slots ',drop-slots
+                     :migrate-forward ,migrate-forward
+                     :migrate-backward ,migrate-backward
+                     :lossy-p ,lossy))
+
+(defun contract-clause-form (cname &key check)
+  `(make-contract :name ',cname :check-fn ,check :source ',check))
+
+(defun check-clause-kind (clause)
+  "Signal a CASE-FAILURE for a clause kind DEFPATCH-SET does not know."
+  (ecase (first clause)
+    ((:function :method :class :contract) clause)))
+
+(defun clause-forms (kind clauses)
+  "Constructor forms for the CLAUSES of KIND, in declaration order."
+  (loop for (clause-kind . body) in clauses
+        when (eq clause-kind kind)
+          collect (apply (ecase kind
+                           (:function #'function-clause-form)
+                           (:method #'method-clause-form)
+                           (:class #'class-clause-form)
+                           (:contract #'contract-clause-form))
+                         body)))
 
 (defmacro defpatch-set (name (&key description ticket (ramp ''(5 25 100))
                                 paired-fallback (alpha 0.01d0) (beta 0.05d0)
@@ -25,46 +69,16 @@
   (:class name :add-slots (...) :drop-slots (...)
           :migrate-forward lambda :migrate-backward lambda :lossy bool)
   (:contract name :check lambda-form)"
-  (let ((fns '()) (methods '()) (classes '()) (contracts '()))
-    (dolist (clause clauses)
-      (ecase (first clause)
-        (:function
-         (destructuring-bind (fname form) (rest clause)
-           (push `(make-fn-patch
-                   :name ',fname :new-fn ,form :new-source ',form
-                   :new-source-hash (sha256-hex (prin1-to-string ',form)))
-                 fns)))
-        (:method
-            (destructuring-bind ((gf-name &rest specializers) form) (rest clause)
-              (push `(make-method-patch
-                      :gf-name ',gf-name :specializer-names ',specializers
-                      :new-fn ,form :new-source ',form
-                      :new-source-hash (sha256-hex (prin1-to-string ',form)))
-                    methods)))
-        (:class
-         (destructuring-bind (cname &key add-slots drop-slots
-                                      migrate-forward migrate-backward lossy)
-             (rest clause)
-           (push `(make-class-patch
-                   :class-name ',cname :add-slots ',add-slots
-                   :drop-slots ',drop-slots
-                   :migrate-forward ,migrate-forward
-                   :migrate-backward ,migrate-backward
-                   :lossy-p ,lossy)
-                 classes)))
-        (:contract
-         (destructuring-bind (cn &key check) (rest clause)
-           (push `(make-contract :name ',cn :check-fn ,check :source ',check)
-                 contracts)))))
-    `(register-patch-set
-      (make-patch-set :name ',name :description ,description :ticket ,ticket
-                      :ramp ,ramp :paired-fallback ,paired-fallback
-                      :alpha ,alpha :beta ,beta
-                      :sprt-min-n ,sprt-min-n :sprt-max-n ,sprt-max-n
-                      :fn-patches (list ,@(nreverse fns))
-                      :method-patches (list ,@(nreverse methods))
-                      :class-patches (list ,@(nreverse classes))
-                      :contracts (list ,@(nreverse contracts))))))
+  (mapc #'check-clause-kind clauses)
+  `(register-patch-set
+    (make-patch-set :name ',name :description ,description :ticket ,ticket
+                    :ramp ,ramp :paired-fallback ,paired-fallback
+                    :alpha ,alpha :beta ,beta
+                    :sprt-min-n ,sprt-min-n :sprt-max-n ,sprt-max-n
+                    :fn-patches (list ,@(clause-forms :function clauses))
+                    :method-patches (list ,@(clause-forms :method clauses))
+                    :class-patches (list ,@(clause-forms :class clauses))
+                    :contracts (list ,@(clause-forms :contract clauses)))))
 
 ;;; Static checks that run at registration, veto early
 
@@ -109,20 +123,30 @@ This is such a cool use of code as data."
           (format nil "~a is not fbound; cannot patch what isn't there"
                   (fn-patch-name fp)))))
 
+(defun finished-p (ps)
+  "True once PS can no longer route a call to new code."
+  (member (patch-set-state ps) '(:rolled-back :promoted :vetoed)))
+
+(defun other-in-flight-sets (ps)
+  "Every registered set other than PS that is not finished."
+  (loop for other being the hash-values of *patch-sets*
+        unless (or (eq other ps) (finished-p other))
+          collect other))
+
+(defun shared-function-names (ps other)
+  "Names of the functions both PS and OTHER patch, in PS's order."
+  (let ((theirs (mapcar #'fn-patch-name (patch-set-fn-patches other))))
+    (remove-if-not (lambda (name) (member name theirs))
+                   (mapcar #'fn-patch-name (patch-set-fn-patches ps)))))
+
 (defun check-overlap (ps)
   "At most one in-flight canary per function (Erlang's two-version cap)."
-  (maphash
-   (lambda (other-name other)
-     (unless (or (eq other ps)
-                 (member (patch-set-state other)
-                         '(:rolled-back :promoted :vetoed)))
-       (dolist (fp (patch-set-fn-patches ps))
-         (when (find (fn-patch-name fp) (patch-set-fn-patches other)
-                     :key #'fn-patch-name)
-           (veto ps :static-overlap
-                 (format nil "~a is already in flight in set ~a"
-                         (fn-patch-name fp) other-name))))))
-   *patch-sets*))
+  (dolist (other (other-in-flight-sets ps))
+    (let ((shared (shared-function-names ps other)))
+      (when shared
+        (veto ps :static-overlap
+              (format nil "~a is already in flight in set ~a"
+                      (first shared) (patch-set-name other)))))))
 
 (defun veto (ps kind detail)
   (setf (patch-set-state ps) :vetoed)
@@ -133,91 +157,128 @@ This is such a cool use of code as data."
 ;;; ---------------------------------------------------------------------
 ;;; Registration: capture the old world, run static checks, audit
 
-(defun register-patch-set (ps)
-  (setf (gethash (patch-set-name ps) *patch-sets*) ps)
-  ;; static existence + old-world capture first; everything else needs it
-  (dolist (fp (patch-set-fn-patches ps))
-    (check-function-exists ps fp)
-    (setf (fn-patch-old-fn fp) (fdefinition (fn-patch-name fp))
-          (fn-patch-old-source-hash fp)
-          (sha256-hex (princ-to-string (fdefinition (fn-patch-name fp))))))
-  (dolist (mp (patch-set-method-patches ps))
-    (let* ((gf (fdefinition (method-patch-gf-name mp)))
-           (method (find-method gf (method-patch-qualifiers mp)
-                                (mapcar #'find-class
-                                        (method-patch-specializer-names mp))
-                                nil)))
-      (unless method
-        (veto ps :static-missing
-              (format nil "no method (~a ~{~a~^ ~})"
-                      (method-patch-gf-name mp)
-                      (method-patch-specializer-names mp))))
-      (setf (method-patch-old-method mp) method)))
-  (dolist (cp (patch-set-class-patches ps))
-    (unless (find-class (class-patch-class-name cp) nil)
+(defun capture-old-function (ps fp)
+  "Check FP's function exists, then record the original for rollback."
+  (check-function-exists ps fp)
+  (let ((old (fdefinition (fn-patch-name fp))))
+    (setf (fn-patch-old-fn fp) old
+          (fn-patch-old-source-hash fp) (sha256-hex (princ-to-string old)))))
+
+(defun find-old-method (mp)
+  "The method MP replaces, or NIL when the generic function has none."
+  (find-method (fdefinition (method-patch-gf-name mp))
+               (method-patch-qualifiers mp)
+               (mapcar #'find-class (method-patch-specializer-names mp))
+               nil))
+
+(defun capture-old-method (ps mp)
+  "Check MP's method exists, then record it for rollback."
+  (let ((method (find-old-method mp)))
+    (unless method
       (veto ps :static-missing
-            (format nil "class ~a does not exist" (class-patch-class-name cp))))
-    (multiple-value-bind (slots supers)
-        (capture-class-shape (class-patch-class-name cp))
-      (setf (class-patch-old-slot-specs cp) slots
-            (class-patch-old-superclass-names cp) supers)))
-  ;; remaining static gates
+            (format nil "no method (~a ~{~a~^ ~})"
+                    (method-patch-gf-name mp)
+                    (method-patch-specializer-names mp))))
+    (setf (method-patch-old-method mp) method)))
+
+(defun capture-old-class (ps cp)
+  "Check CP's class exists, then record its current shape for rollback."
+  (unless (find-class (class-patch-class-name cp) nil)
+    (veto ps :static-missing
+          (format nil "class ~a does not exist" (class-patch-class-name cp))))
+  (multiple-value-bind (slots supers)
+      (capture-class-shape (class-patch-class-name cp))
+    (setf (class-patch-old-slot-specs cp) slots
+          (class-patch-old-superclass-names cp) supers)))
+
+(defun capture-old-world (ps)
+  "Record everything PS replaces. The static checks that follow need it."
+  (dolist (fp (patch-set-fn-patches ps)) (capture-old-function ps fp))
+  (dolist (mp (patch-set-method-patches ps)) (capture-old-method ps mp))
+  (dolist (cp (patch-set-class-patches ps)) (capture-old-class ps cp)))
+
+(defun run-static-checks (ps)
   (check-overlap ps)
   (dolist (fp (patch-set-fn-patches ps))
     (check-arity-compatibility ps fp)
-    (check-inlining-hazard ps fp))
-  (setf (patch-set-state ps) :registered)
-  (push (cons :registered (get-universal-time)) (patch-set-history ps))
+    (check-inlining-hazard ps fp)))
+
+(defun fn-patch-audit-fields (fp)
+  (list :name (fn-patch-name fp)
+        :new-source-hash (fn-patch-new-source-hash fp)
+        :old-identity-hash (fn-patch-old-source-hash fp)
+        :new-source (fn-patch-new-source fp)))
+
+(defun method-patch-audit-fields (mp)
+  (list :gf (method-patch-gf-name mp)
+        :specializers (method-patch-specializer-names mp)
+        :new-source-hash (method-patch-new-source-hash mp)))
+
+(defun class-patch-audit-fields (cp)
+  (list :class (class-patch-class-name cp)
+        :add-slots (class-patch-add-slots cp)
+        :drop-slots (class-patch-drop-slots cp)
+        :lossy (class-patch-lossy-p cp)))
+
+(defun audit-registration (ps)
   (audit :patch-registered
          :patch-set (patch-set-name ps)
          :description (patch-set-description ps)
          :ticket (patch-set-ticket ps)
          :ramp (patch-set-ramp ps)
          :paired-fallback (patch-set-paired-fallback ps)
-         :functions (mapcar (lambda (fp)
-                              (list :name (fn-patch-name fp)
-                                    :new-source-hash (fn-patch-new-source-hash fp)
-                                    :old-identity-hash (fn-patch-old-source-hash fp)
-                                    :new-source (fn-patch-new-source fp)))
-                            (patch-set-fn-patches ps))
-         :methods (mapcar (lambda (mp)
-                            (list :gf (method-patch-gf-name mp)
-                                  :specializers (method-patch-specializer-names mp)
-                                  :new-source-hash (method-patch-new-source-hash mp)))
-                          (patch-set-method-patches ps))
+         :functions (mapcar #'fn-patch-audit-fields (patch-set-fn-patches ps))
+         :methods (mapcar #'method-patch-audit-fields (patch-set-method-patches ps))
          :classes (mapcar #'class-patch-class-name (patch-set-class-patches ps))
-         :class-details (mapcar (lambda (cp)
-                                  (list :class (class-patch-class-name cp)
-                                        :add-slots (class-patch-add-slots cp)
-                                        :drop-slots (class-patch-drop-slots cp)
-                                        :lossy (class-patch-lossy-p cp)))
-                                (patch-set-class-patches ps)))
+         :class-details (mapcar #'class-patch-audit-fields
+                                (patch-set-class-patches ps))))
+
+(defun register-patch-set (ps)
+  "Store PS, capture what it replaces, run the static checks and audit it.
+Any failed check vetoes PS."
+  (setf (gethash (patch-set-name ps) *patch-sets*) ps)
+  (capture-old-world ps)
+  (run-static-checks ps)
+  (setf (patch-set-state ps) :registered)
+  (push (cons :registered (get-universal-time)) (patch-set-history ps))
+  (audit-registration ps)
   ps)
 
 ;;; Veto gate between REGISTERED and STAGED
 
+(defun check-contract (contract)
+  "Run CONTRACT's check. Returns :PASS or :FAIL, and as a second value the
+printed error when the check signaled one."
+  (multiple-value-bind (ok err)
+      (ignore-errors (values (funcall (contract-check-fn contract))))
+    (values (if (and ok (not err)) :pass :fail)
+            (and err (princ-to-string err)))))
+
+(defun audit-contract-result (ps contract phase verdict detail)
+  (audit :contract-result :patch-set (patch-set-name ps)
+                          :contract (contract-name contract) :phase phase
+                          :verdict verdict :detail detail))
+
+(defun veto-failed-contract (ps contract detail)
+  "Mark PS vetoed for a failed pre-flight CONTRACT and signal PATCH-VETOED."
+  (setf (patch-set-state ps) :vetoed)
+  (error 'patch-vetoed :patch-set ps :contract (contract-name contract)
+                       :detail (or detail "check returned NIL")))
+
 (defun run-contracts (ps &key (phase :pre-flight))
   "Run every contract. A failure signals PATCH-VETOED at pre-flight, or
-returns the failing contract's name at runtime. Returns T when all pass."
+returns the failing contract's name at runtime. Returns T when all pass.
+Contracts run outside any task, so a plain call reaches old code."
   (let ((*contract-context* ps)
         (*task-epochs* nil)
         (*task-shim-routes* nil))
     (dolist (contract (patch-set-contracts ps) t)
-      (multiple-value-bind (ok err)
-          (ignore-errors (values (funcall (contract-check-fn contract))))
-        (let ((passed (and ok (not err))))
-          (audit :contract-result :patch-set (patch-set-name ps)
-                                  :contract (contract-name contract) :phase phase
-                                  :verdict (if passed :pass :fail)
-                                  :detail (and err (princ-to-string err)))
-          (unless passed
-            (if (eq phase :pre-flight)
-                (progn (setf (patch-set-state ps) :vetoed)
-                       (error 'patch-vetoed :patch-set ps
-                                            :contract (contract-name contract)
-                                            :detail (or (and err (princ-to-string err))
-                                                        "check returned NIL")))
-                (return-from run-contracts (contract-name contract)))))))))
+      (multiple-value-bind (verdict detail) (check-contract contract)
+        (audit-contract-result ps contract phase verdict detail)
+        (when (eq verdict :fail)
+          (if (eq phase :pre-flight)
+              (veto-failed-contract ps contract detail)
+              (return-from run-contracts (contract-name contract))))))))
 
 ;;; Shims: the per-task routing indirection
 ;;;
