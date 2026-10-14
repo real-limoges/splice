@@ -99,7 +99,7 @@ joining the set."
 (defstruct fault
   kind
   (latent-code "VIP")           ; :latent trips on this discount code
-  (share-threshold 0.12)        ; :load-correlated trips above this share
+  (share-threshold 0.15)        ; :load-correlated trips above this share
   (window-min-total 100)        ; ... once the window has enough traffic
   (onset-calls 250)             ; :delayed-onset healthy for this many calls
   (onset-error-rate 0.30)
@@ -117,7 +117,7 @@ joining the set."
     ((nil) "clean patch, no injected fault")
     (:latent "fails only for VIP-coded orders (input-dependent subclass)")
     (:load-correlated
-     "fails only once canary code exceeds ~12% of traffic (pool exhaustion)")
+     "fails only once canary code exceeds ~15% of traffic (pool exhaustion)")
     (:slow-burn "no errors; +3ms latency on every canary invoice")
     (:delayed-onset "healthy for 250 calls, then 30% error rate")
     (:migration "forward instance migration fails on corrupted orders")))
