@@ -132,7 +132,7 @@ tolerable; the window is statistical."
          (w (fault-window f)))
     (when (> (- now (first w)) bucket-ticks)
       (setf (fault-window f) (setf w (list now 0 0))))
-    (incf (second w))
+    (when (eq which :total) (incf (second w)))
     (when (eq which :canary) (incf (third w)))))
 
 (defun maybe-inject (site order rng-draw)
