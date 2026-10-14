@@ -222,7 +222,7 @@ tolerable; the window is statistical."
 
 (defun register-currency-patch-set (&key (ramp '(5 25 100)) (alpha 0.01d0)
                                       (beta 0.05d0) (min-n 50) (max-n 2000)
-                                      paired-fallback)
+                                      paired-fallback lossy)
   "Register a fresh flagship patch set. Faults come from *FAULT*, so one set
 serves every session."
   (unregister-patch-set 'currency-migration)
@@ -262,7 +262,8 @@ serves every session."
            :add-slots '((amount-minor-units :initform 0))
            :drop-slots '(float-total)
            :migrate-forward #'forward-migration
-           :migrate-backward #'backward-migration))
+           :migrate-backward #'backward-migration
+           :lossy-p lossy))
     :contracts
     (list (splice::make-contract
            :name 'invoice-is-exact

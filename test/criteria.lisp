@@ -74,6 +74,36 @@
     (close-audit-log)))
 
 ;;; ---------------------------------------------------------------------
+;;; Resume after a hard trigger (own log, like the checkpoints)
+
+(defun check-resume-after-hard-trigger ()
+  (format t "~%--- resume after a hard trigger on a lossy set~%")
+  (let ((log (scratch-file "splice-criteria-resume.log")))
+    (open-audit-log log)
+    (reset-workload)
+    (let ((corrupted (first (make-pre-existing-orders (make-rng 41) 1 :corrupted 1)))
+          (ps (register-currency-patch-set :lossy t)))
+      (install ps)
+      ;; the corrupted order fails forward migration and arms the hard trigger;
+      ;; a lossy set freezes for a human rather than rolling back
+      (let ((*fault* (make-fault :kind :migration)))
+        (with-task (:id 1 :swallow-errors t)
+          (process-order corrupted)))
+      (check "Resume: hard trigger freezes a lossy set for a human"
+             (and (eq (patch-set-state ps) :frozen)
+                  (eq (first (splice::patch-set-freeze-reason ps))
+                      :lossy-reversal-needs-human))
+             (list (patch-set-state ps) (splice::patch-set-freeze-reason ps)))
+      (unfreeze ps :resume :operator "criteria")
+      (with-task (:id 2 :swallow-errors t)
+        (process-order (make-test-order)))
+      (check "Resume: unfreeze :resume survives the next task"
+             (splice::canary-stage-p (patch-set-state ps))
+             (patch-set-state ps)))
+    (reset-workload)
+    (close-audit-log)))
+
+;;; ---------------------------------------------------------------------
 ;;; C4 pre-work: the pristine workload signature, captured before any patch
 
 (defun workload-signature (seed n)
@@ -342,6 +372,7 @@ and the full-log checks run last."
         (*big-log* (scratch-file "splice-criteria.log")))
     (format t "~%=== splice criteria runner (~a runs per class) ===~%" *runs*)
     (check-reconstruction-checkpoints)
+    (check-resume-after-hard-trigger)
     (open-audit-log *big-log*)
     (let ((pristine (workload-signature 777 300)))
       (check-flagship)
