@@ -17,8 +17,8 @@
 
 (defvar *audit-log* nil "The active audit log, or NIL for none.")
 
-(defun open-audit-log (path &key (if-exists :supersede))
-  (let ((stream (open path :direction :output :if-exists if-exists
+(defun open-audit-log (path)
+  (let ((stream (open path :direction :output :if-exists :supersede
                            :if-does-not-exist :create)))
     (setf *audit-log* (%make-audit-log :path path :stream stream))))
 
@@ -50,9 +50,7 @@ functions, and other unREADable objects become (:opaque <hash-of-printed>)."
     ((or number string keyword boolean) value)
     (symbol value)
     (cons (cons (sanitize-for-log (car value))
-                (if (listp (cdr value))
-                    (mapcar #'sanitize-for-log (cdr value))
-                    (sanitize-for-log (cdr value)))))
+                (sanitize-for-log (cdr value))))
     (condition (list :condition (string (type-of value))
                      (flatten-newlines (princ-to-string value))))
     (t (list :opaque (subseq (sha256-hex (princ-to-string value)) 0 16)))))
