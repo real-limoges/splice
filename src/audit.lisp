@@ -17,8 +17,8 @@
 
 (defvar *audit-log* nil "The active audit log, or NIL for none.")
 
-(defun open-audit-log (path &key (if-exists :supersede))
-  (let ((stream (open path :direction :output :if-exists if-exists
+(defun open-audit-log (path)
+  (let ((stream (open path :direction :output :if-exists :supersede
                            :if-does-not-exist :create)))
     (setf *audit-log* (%make-audit-log :path path :stream stream))))
 
@@ -27,26 +27,35 @@
     (close (audit-log-stream *audit-log*))
     (setf *audit-log* nil)))
 
+(defconstant +unix-epoch-universal-time+ 2208988800
+  "Universal epoch time (1970-01-01T00:00:00Z)")
+
 (defun timestamp-string ()
-  (multiple-value-bind (sec min hour day month year) (get-decoded-time)
-    (format nil "~4,'0d-~2,'0d-~2,'0dT~2,'0d:~2,'0d:~2,'0d.~3,'0d"
-            year month day hour min sec
-            (mod (round (/ (get-internal-real-time)
-                           (/ internal-time-units-per-second 1000)))
-                 1000))))
+  "UTC wall clock time in ms, ISO 8601 standard"
+  (multiple-value-bind (unix-seconds microseconds) (sb-ext:get-time-of-day)
+    (multiple-value-bind (sec min hour day month year)
+        (decode-universal-time (+ unix-seconds +unix-epoch-universal-time+) 0)
+      (format nil "~4,'0d-~2,'0d-~2,'0dT~2,'0d:~2,'0d:~2,'0d.~3,'0dZ"
+              year month day hour min sec (floor microseconds 1000)))))
+
+(defun flatten-newlines (string)
+  "STRING with line breaks replaced by spaces, so log entries stay
+on one line."
+  (substitute-if #\Space
+                 (lambda (char) (member char '(#\Newline #\Return)))
+                 string))
 
 (defun sanitize-for-log (value)
   "Reduce VALUE to something READably printable. Structure instances,
 functions, and other unREADable objects become (:opaque <hash-of-printed>)."
   (typecase value
-    ((or number string keyword boolean) value)
+    (string (flatten-newlines value))
+    ((or number keyword boolean) value)
     (symbol value)
     (cons (cons (sanitize-for-log (car value))
-                (if (listp (cdr value))
-                    (mapcar #'sanitize-for-log (cdr value))
-                    (sanitize-for-log (cdr value)))))
+                (sanitize-for-log (cdr value))))
     (condition (list :condition (string (type-of value))
-                     (princ-to-string value)))
+                     (flatten-newlines (princ-to-string value))))
     (t (list :opaque (subseq (sha256-hex (princ-to-string value)) 0 16)))))
 
 (defun audit (event &rest fields)
