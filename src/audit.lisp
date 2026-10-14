@@ -35,10 +35,18 @@
                            (/ internal-time-units-per-second 1000)))
                  1000))))
 
+(defun flatten-newlines (string)
+  "STRING with line breaks replaced by spaces, so log entries stay
+on one line."
+  (substitute-if #\Space
+                 (lambda (char) (member char '(#\Newline #\Return)))
+                 string))
+
 (defun sanitize-for-log (value)
   "Reduce VALUE to something READably printable. Structure instances,
 functions, and other unREADable objects become (:opaque <hash-of-printed>)."
   (typecase value
+    (string (flatten-newlines value))
     ((or number string keyword boolean) value)
     (symbol value)
     (cons (cons (sanitize-for-log (car value))
@@ -46,7 +54,7 @@ functions, and other unREADable objects become (:opaque <hash-of-printed>)."
                     (mapcar #'sanitize-for-log (cdr value))
                     (sanitize-for-log (cdr value)))))
     (condition (list :condition (string (type-of value))
-                     (princ-to-string value)))
+                     (flatten-newlines (princ-to-string value))))
     (t (list :opaque (subseq (sha256-hex (princ-to-string value)) 0 16)))))
 
 (defun audit (event &rest fields)
