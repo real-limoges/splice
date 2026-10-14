@@ -36,9 +36,14 @@
    #:fallback-to-old #:force-promote #:abort-patch
 
    ;; condition readers
+   #:splice-condition-patch-set
    #:patch-vetoed-contract #:patch-vetoed-detail
    #:canary-anomaly-cause #:canary-anomaly-task
-   #:migration-failure-instance #:migration-failure-cause
+   #:canary-verdict-stream #:canary-verdict-direction
+   #:canary-verdict-n #:canary-verdict-llr
+   #:migration-failure-instance #:migration-failure-direction
+   #:migration-failure-cause
+   #:rollback-initiated-trigger #:rollback-failure-cause
 
    ;; utilities
    #:sha256-hex #:sha256-self-test))

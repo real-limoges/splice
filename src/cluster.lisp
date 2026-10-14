@@ -38,11 +38,11 @@ forms so members can refuse a mismatch."
           '((price-order
              (lambda (order)
                (splice/harness::maybe-inject :price order
-                (if splice/harness::*fault-rng*
-                    (splice/harness::rng-uniform splice/harness::*fault-rng*)
-                    0.5))
+                                             (if splice/harness::*fault-rng*
+                                                 (splice/harness::rng-uniform splice/harness::*fault-rng*)
+                                                 0.5))
                (let ((cents (round (* 100 (splice/harness:order-item-count order)
-                                       (rational (splice/harness:order-unit-price order))))))
+                                      (rational (splice/harness:order-unit-price order))))))
                  (setf (slot-value order 'splice/harness::amount-minor-units) cents
                        (splice/harness:order-status order) :priced)
                  (splice/harness::write-through-float order cents)
@@ -147,8 +147,8 @@ Drives its own synthetic workload once committed."
              (handler-case
                  (progn
                    (splice:install ps)
-                   (setf worker (start-member-workload ps stream stop port orders))
-                   (send-form stream (list :committed)))
+                   (send-form stream (list :committed))
+                   (setf worker (start-member-workload ps stream stop port orders)))
                (splice:patch-vetoed (e)
                  (send-form stream (list :veto :reason (princ-to-string e))))))
             (:rollback
@@ -197,11 +197,11 @@ the conductor every 200 tasks."
                        (nth (mod (splice/harness:rng-next rng) (length orders))
                             orders)
                        (make-instance 'splice/harness:order
-                        :id i
-                        :item-count (splice/harness:rng-range rng 1 9)
-                        :unit-price (/ (splice/harness:rng-range rng 100 9999) 100.0)
-                        :discount-code (case (mod (splice/harness:rng-next rng) 5)
-                                         (0 "TEN") (1 "VIP") (t nil))))))
+                                      :id i
+                                      :item-count (splice/harness:rng-range rng 1 9)
+                                      :unit-price (/ (splice/harness:rng-range rng 100 9999) 100.0)
+                                      :discount-code (case (mod (splice/harness:rng-next rng) 5)
+                                                       (0 "TEN") (1 "VIP") (t nil))))))
                 (when (zerop (mod i 200))
                   (let ((sprt (splice::patch-set-sprt-error ps)))
                     (ignore-errors
@@ -220,7 +220,7 @@ the conductor every 200 tasks."
 ;;; Conductor
 
 (defstruct member-state host port stream socket thread
-  (latest-llr 0.0) (latest-n 0) (state :unknown) (terminal nil) (final nil))
+           (latest-llr 0.0) (latest-n 0) (state :unknown) (terminal nil) (final nil))
 
 (defun connect-member (host port &key (retries 40))
   (loop for attempt from 1 do
@@ -237,7 +237,7 @@ the conductor every 200 tasks."
         (sleep 0.25)))))
 
 (defun run-conductor (members-spec &key (alpha 0.01d0) (beta 0.05d0)
-                                        (log-path "/tmp/splice-conductor.log"))
+                                     (log-path "/tmp/splice-conductor.log"))
   "MEMBERS-SPEC is a list of (host port &key fault). Rolls back the cluster
 when the summed member LLRs cross the Wald upper bound or any member rolls
 back locally. Returns the final reports."
@@ -265,7 +265,7 @@ back locally. Returns the final reports."
 (defun prepare-members (members members-spec spec)
   "PREPARE on every member; any veto aborts the cluster."
   (splice:audit :cluster-prepare :members (mapcar #'second members-spec)
-                :spec-hash (getf spec :hash))
+                                 :spec-hash (getf spec :hash))
   (loop for ms in members
         for (nil nil . opts) in members-spec
         do (send-form (member-state-stream ms)
@@ -348,7 +348,7 @@ whose stream ended reports :state :died."
             (send-form (member-state-stream ms) '(:report))
             (let ((final (loop for msg = (read-form (member-state-stream ms))
                                when (eq msg :eof) return msg
-                               when (eq (first msg) :final) return msg)))
+                                 when (eq (first msg) :final) return msg)))
               (ignore-errors
                (send-form (member-state-stream ms) '(:bye)))
               (ignore-errors (close (member-state-stream ms)))
