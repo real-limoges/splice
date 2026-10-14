@@ -27,13 +27,16 @@
     (close (audit-log-stream *audit-log*))
     (setf *audit-log* nil)))
 
+(defconstant +unix-epoch-universal-time+ 2208988800
+  "Universal epoch time (1970-01-01T00:00:00Z)")
+
 (defun timestamp-string ()
-  (multiple-value-bind (sec min hour day month year) (get-decoded-time)
-    (format nil "~4,'0d-~2,'0d-~2,'0dT~2,'0d:~2,'0d:~2,'0d.~3,'0d"
-            year month day hour min sec
-            (mod (round (/ (get-internal-real-time)
-                           (/ internal-time-units-per-second 1000)))
-                 1000))))
+  "UTC wall clock time in ms, ISO 8601 standard"
+  (multiple-value-bind (unix-seconds microseconds) (sb-ext:get-time-of-day)
+    (multiple-value-bind (sec min hour day month year)
+        (decode-universal-time (+ unix-seconds +unix-epoch-universal-time+) 0)
+      (format nil "~4,'0d-~2,'0d-~2,'0dT~2,'0d:~2,'0d:~2,'0d.~3,'0dZ"
+              year month day hour min sec (floor microseconds 1000)))))
 
 (defun flatten-newlines (string)
   "STRING with line breaks replaced by spaces, so log entries stay
@@ -47,7 +50,7 @@ on one line."
 functions, and other unREADable objects become (:opaque <hash-of-printed>)."
   (typecase value
     (string (flatten-newlines value))
-    ((or number string keyword boolean) value)
+    ((or number keyword boolean) value)
     (symbol value)
     (cons (cons (sanitize-for-log (car value))
                 (sanitize-for-log (cdr value))))
