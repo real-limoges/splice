@@ -83,10 +83,10 @@
           collect (with-task (:id i)
                     (process-order
                      (make-instance 'order :id i
-                       :item-count (rng-range rng 1 9)
-                       :unit-price (/ (rng-range rng 100 9999) 100.0)
-                       :discount-code (case (mod (rng-next rng) 5)
-                                        (0 "TEN") (1 "VIP") (t nil))))))))
+                                           :item-count (rng-range rng 1 9)
+                                           :unit-price (/ (rng-range rng 100 9999) 100.0)
+                                           :discount-code (case (mod (rng-next rng) 5)
+                                                            (0 "TEN") (1 "VIP") (t nil))))))))
 
 ;;; ---------------------------------------------------------------------
 ;;; C1: the flagship scenario
@@ -101,7 +101,7 @@
       (check "Flagship: fdefinitions EQ to originals" (getf cmp :fdefinitions-eq) cmp)
       (check "Flagship: class shape restored" (getf cmp :class-shape-original) nil)
       (check "Flagship: every pre-existing instance restored to snapshot"
-             (= (getf cmp :snapshot-restored) (getf cmp :snapshot-total))
+             (and cmp (= (getf cmp :snapshot-restored) (getf cmp :snapshot-total)))
              (format nil "~a/~a" (getf cmp :snapshot-restored)
                      (getf cmp :snapshot-total))))
     (let ((rev (first (session-result-reversal-report r))))
@@ -238,21 +238,21 @@ migrated forward mid-canary, then restored)"
       (install ps)
       ;; canary in flight: measure the shim on both routes, inside task scope
       (let* ((shim-old (let ((splice::*task-epochs* (list (list ps :old)))
-                            (splice::*task-shim-routes* '()))
+                             (splice::*task-shim-routes* '()))
                          (ns-per-call `(lambda (n)
                                          (let ((o ,bench-order))
                                            (dotimes (i n) (price-order o)))))))
              (shim-new (let ((splice::*task-epochs* (list (list ps :new)))
-                            (splice::*task-shim-routes* '()))
+                             (splice::*task-shim-routes* '()))
                          (ns-per-call `(lambda (n)
                                          (let ((o ,(make-instance 'order :id 2
-                                                    :item-count 3 :unit-price 19.99)))
+                                                                         :item-count 3 :unit-price 19.99)))
                                            (dotimes (i n) (price-order o))))))))
         (promote ps :operator "criteria")
         (wait-for-state ps '(:promoted) :timeout 30)
         (let ((promoted (ns-per-call `(lambda (n)
                                         (let ((o ,(make-instance 'order :id 3
-                                                   :item-count 3 :unit-price 19.99)))
+                                                                        :item-count 3 :unit-price 19.99)))
                                           (dotimes (i n) (price-order o)))))))
           (push (list :plain plain :shim-old shim-old :shim-new shim-new
                       :promoted promoted)
