@@ -40,6 +40,34 @@ jobs:
       - name: SBCL version
         run: sbcl --version
 
+      # FiveAM and its dependencies, for the unit tests. These are the
+      # Quicklisp release tarballs local development loads, checked against
+      # their SHA-256 so a changed archive fails here rather than in a test.
+      # ASDF finds anything under ~/common-lisp/ with no configuration.
+      - name: Fetch FiveAM
+        run: |
+          mkdir -p ~/common-lisp
+          cd ~/common-lisp
+          base=https://beta.quicklisp.org/archive
+          curl -fsSLO $base/alexandria/2024-10-12/alexandria-20241012-git.tgz
+          curl -fsSLO $base/asdf-flv/2023-10-21/asdf-flv-version-2.2.tgz
+          curl -fsSLO $base/fiveam/2024-10-12/fiveam-20241012-git.tgz
+          curl -fsSLO $base/trivial-backtrace/2023-02-14/trivial-backtrace-20230214-git.tgz
+          sha256sum -c <<'EOF'
+          dcdfc5bac229a952358dfe661f0860e8a02480e406d0d95dee4300cdc3d45b31  alexandria-20241012-git.tgz
+          63f3aeaf7a93e9c590e674430dbd80dca387c8a18280bef74d58fcb83551a203  asdf-flv-version-2.2.tgz
+          860dd99e52fe83bd4a286f9b85b53981969bf641c1da96b64a895bea4137ab61  fiveam-20241012-git.tgz
+          e34a3355ca15c2e0ed84160046c2b16680a7e8b164d67d5a049656786af6c84f  trivial-backtrace-20230214-git.tgz
+          EOF
+          for archive in *.tgz; do tar -xzf "$archive"; done
+
+      - name: Unit tests
+        run: >
+          sbcl --non-interactive
+          --eval '(require :asdf)'
+          --eval '(asdf:load-asd (truename "splice.asd"))'
+          --eval '(asdf:test-system "splice")'
+
       # The demo rewrites artifacts/demo-audit.log, which is tracked. That is
       # harmless in a throwaway checkout, but a step added later that checks for
       # a clean tree has to run before this one or restore the file.
@@ -60,7 +88,7 @@ jobs:
           sbcl --non-interactive
           --eval '(require :asdf)'
           --eval '(asdf:load-asd (truename "splice.asd"))'
-          --eval '(asdf:test-system "splice")'
+          --eval '(asdf:test-system "splice/criteria")'
 
       - name: Upload criteria report
         if: always()

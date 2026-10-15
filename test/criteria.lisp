@@ -3,7 +3,7 @@
 ;;;;
 ;;;;   sbcl --non-interactive --eval '(require :asdf)' \
 ;;;;        --eval '(asdf:load-asd (truename "splice.asd"))' \
-;;;;        --eval '(asdf:test-system "splice")'              ; full (~2-4 min)
+;;;;        --eval '(asdf:test-system "splice/criteria")'     ; full (~2-4 min)
 ;;;;
 ;;;; SPLICE_RUNS=20 in the environment gives a quicker run. TEST-OP signals
 ;;;; an error when any criterion fails, so a non-interactive run exits
@@ -20,6 +20,9 @@
 (defvar *report* '())
 (defvar *batches* '())
 (defvar *big-log* nil "The log every section after the checkpoints shares.")
+(defvar *mixed-executions* 0
+  "Mixed executions summed over every canary session in the run. The harness
+resets its own counter at the start of each session.")
 
 (defun root () (asdf:system-source-directory "splice"))
 (defun scratch-file (name) (merge-pathnames name (uiop:temporary-directory)))
@@ -167,7 +170,9 @@ type-check the shim's :NEW into an error."
 ;;; C4 pre-work: the pristine workload signature, captured before any patch
 
 (defun workload-signature (seed n)
-  (reset-workload)
+  "Totals from N seeded orders run against whatever code and class shape are
+live now. It does not reset the workload, so the post-rollback capture sees
+what the rollback left behind."
   (let ((rng (make-rng seed)))
     (loop for i from 1 to n
           collect (with-task (:id i)
@@ -181,9 +186,15 @@ type-check the shim's :NEW into an error."
 ;;; ---------------------------------------------------------------------
 ;;; C1: the flagship scenario
 
+(defun run-session (&rest args)
+  "RUN-CANARY-SESSION, adding the session's mixed executions to the run total."
+  (let ((r (apply #'run-canary-session args)))
+    (incf *mixed-executions* (session-result-mixed-executions r))
+    r))
+
 (defun check-flagship ()
   (format t "~%--- C1: flagship, 3 functions + method + class, latent fault, 5/25/100 ramp~%")
-  (let ((r (run-canary-session :fault :latent :seed 4242 :quiet t)))
+  (let ((r (run-session :fault :latent :seed 4242 :quiet t)))
     (check "Flagship: fault caught and rolled back"
            (eq (session-result-final-state r) :rolled-back)
            (session-result-final-state r))
@@ -219,7 +230,10 @@ migrated forward mid-canary, then restored)"
 ;;; ---------------------------------------------------------------------
 ;;; C2/C6: fault matrix + statistical honesty over *runs* sessions/class
 
-(defstruct batch kind runs (caught 0) stages detect-ns detect-tasks)
+(defstruct batch kind runs (caught 0) final-states stages detect-ns detect-tasks)
+
+(defun batch-count (state b)
+  (count state (batch-final-states b)))
 
 (defun highest-canary-stage (r)
   (loop with best = 0
@@ -231,11 +245,12 @@ migrated forward mid-canary, then restored)"
 (defun run-batch (kind &key threads)
   (let ((b (make-batch :kind kind :runs *runs*)))
     (dotimes (i *runs*)
-      (let* ((r (run-canary-session :fault kind
+      (let* ((r (run-session :fault kind
                                     :seed (+ 10000 (* 131 i)
                                              (if kind (sxhash kind) 0))
                                     :threads (or threads 1) :quiet t))
              (state (session-result-final-state r)))
+        (push state (batch-final-states b))
         (unless (zerop (session-result-mixed-executions r))
           (check (format nil "~a run ~a: mixed executions" kind i) nil
                  (session-result-mixed-executions r)))
@@ -252,13 +267,19 @@ migrated forward mid-canary, then restored)"
   (let ((b (run-batch nil)))
     (push (cons :clean b) *batches*)
     (let* ((k (batch-caught b))        ; every rollback of a clean patch is spurious
-           (ci (wilson-ci k *runs*)))
+           (ci (wilson-ci k *runs*))
+           (promoted (batch-count :promoted b)))
       (check (format nil "C6: clean-patch spurious rollbacks ~a/~a, 95% CI [~,4f, ~,4f] contains alpha=0.01"
                      k *runs* (first ci) (second ci))
              (and (<= (first ci) 0.01) (<= 0.01 (second ci))
-                  ;; and never via a nonsense route: a clean patch must mostly promote
-                  (>= (- *runs* k) (* 0.9 *runs*)))
-             nil))))
+                  ;; and never via a nonsense route: a clean patch must mostly
+                  ;; promote, and a frozen, vetoed or undecided session is not
+                  ;; a promotion
+                  (>= promoted (* 0.9 *runs*)))
+             (format nil "promoted ~a, rolled back ~a, frozen ~a, vetoed ~a, other ~a"
+                     promoted k (batch-count :frozen b) (batch-count :vetoed b)
+                     (- *runs* promoted k (batch-count :frozen b)
+                        (batch-count :vetoed b)))))))
 
 (defun check-fault-batches ()
   (dolist (kind (all-fault-kinds))
@@ -303,8 +324,8 @@ migrated forward mid-canary, then restored)"
     (check (format nil "C3: ~a sampled routes match the deterministic draw (~a bad)"
                    checked bad)
            (and (plusp checked) (zerop bad)) nil))
-  (check "C3: zero mixed executions across the entire criteria run"
-         (zerop (coherence-violations)) (coherence-violations)))
+  (check "C3: zero mixed executions across every canary session"
+         (zerop *mixed-executions*) *mixed-executions*))
 
 ;;; ---------------------------------------------------------------------
 ;;; C7: overhead
@@ -429,12 +450,14 @@ and the full-log checks run last."
         (*failures* '())
         (*report* '())
         (*batches* '())
+        (*mixed-executions* 0)
         (*big-log* (scratch-file "splice-criteria.log")))
     (format t "~%=== splice criteria runner (~a runs per class) ===~%" *runs*)
     (check-reconstruction-checkpoints)
     (check-resume-after-hard-trigger)
     (check-runtime-contract-routing)
     (open-audit-log *big-log*)
+    (reset-workload)
     (let ((pristine (workload-signature 777 300)))
       (check-flagship)
       (check-post-rollback-workload pristine))
