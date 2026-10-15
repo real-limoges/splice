@@ -259,12 +259,6 @@ printed error when the check signaled one."
                           :contract (contract-name contract) :phase phase
                           :verdict verdict :detail detail))
 
-(defun veto-failed-contract (ps contract detail)
-  "Mark PS vetoed for a failed pre-flight CONTRACT and signal PATCH-VETOED."
-  (setf (patch-set-state ps) :vetoed)
-  (error 'patch-vetoed :patch-set ps :contract (contract-name contract)
-                       :detail (or detail "check returned NIL")))
-
 (defun run-contracts (ps &key (phase :pre-flight))
   "Run every contract. A failure signals PATCH-VETOED at pre-flight, or
 returns the failing contract's name at runtime. Returns T when all pass.
@@ -274,11 +268,12 @@ Contracts run outside any task, so a plain call reaches old code."
         (*task-shim-routes* nil))
     (dolist (contract (patch-set-contracts ps) t)
       (multiple-value-bind (verdict detail) (check-contract contract)
-        (audit-contract-result ps contract phase verdict detail)
-        (when (eq verdict :fail)
-          (if (eq phase :pre-flight)
-              (veto-failed-contract ps contract detail)
-              (return-from run-contracts (contract-name contract))))))))
+        (cond ((and (eq verdict :fail) (eq phase :pre-flight))
+               (veto ps (contract-name contract) (or detail "check returned NIL")))
+              (t
+               (audit-contract-result ps contract phase verdict detail)
+               (when (eq verdict :fail)
+                 (return-from run-contracts (contract-name contract)))))))))
 
 ;;; Shims: the per-task routing indirection
 ;;;
