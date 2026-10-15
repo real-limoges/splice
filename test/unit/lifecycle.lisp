@@ -1,6 +1,6 @@
-;;;; lifecycle.lisp: the per-set lock's deferred effects (types.lisp), and
+;;;; lifecycle.lisp: the per-set lock's deferred effects (types.lisp),
 ;;;; operator handlers that re-enter the lifecycle from a verdict or a
-;;;; rollback signal.
+;;;; rollback signal, and which operator requests each state allows.
 
 (in-package #:splice-tests)
 
@@ -136,11 +136,12 @@ retire it whatever happened."
       (is (eq :none escaped) "~a escaped the task" escaped)
       (is (= 1 (length (car seen))))
       (is (eq :reject (canary-verdict-direction (first (car seen)))))
-      ;; the rollback was decided before the handler ran; the final state is
-      ;; not asserted, since the rollback thread still runs on the frozen set
+      ;; the rollback was decided before the handler ran, and its thread
+      ;; gives way to the freeze once the drain ends
+      (join-lifecycle-threads ps)
       (is (search '(:canary-100 :rolling-back :frozen) (state-trail ps))
           "trail was ~s" (state-trail ps))
-      (is-false (splice::canary-stage-p (patch-set-state ps))))))
+      (is (eq :frozen (patch-set-state ps))))))
 
 (test a-rollback-handler-can-freeze-an-operator-rollback
   (with-installed-set (ps (healthy-probe-set 'operator-rollback-then-freeze))
@@ -152,5 +153,93 @@ retire it whatever happened."
       (is (eq :none escaped) "~a escaped roll-back" escaped)
       (is (= 1 (length (car seen))))
       (is (eq :operator (first (rollback-initiated-trigger (first (car seen))))))
+      (join-lifecycle-threads ps)
       (is (search '(:canary-50 :rolling-back :frozen) (state-trail ps))
+          "trail was ~s" (state-trail ps))
+      (is (eq :frozen (patch-set-state ps))))))
+
+(test a-verdict-handler-that-rolls-back-starts-one-rollback
+  (with-installed-set (ps (failing-probe-set 'reject-then-roll-back))
+    (let* ((returned (list '()))
+           (escaped (escaped-error
+                     (lambda ()
+                       (handler-bind ((canary-verdict
+                                        (lambda (c)
+                                          (declare (ignore c))
+                                          (push (roll-back ps :operator "unit-tests")
+                                                (car returned)))))
+                         (drive-tasks (lambda () (car returned))))))))
+      (is (eq :none escaped) "~a escaped the task" escaped)
+      (is (equal '(:no-change) (car returned)))
+      (is (eq :rolled-back (wait-for-state ps '(:rolled-back) :timeout 15)))
+      (join-lifecycle-threads ps)
+      (is (= 1 (count :rolling-back (state-trail ps)))
+          "trail was ~s" (state-trail ps))
+      (is (= 1 (count :restoring (state-trail ps)))
           "trail was ~s" (state-trail ps)))))
+
+(test a-sealed-set-cannot-be-rolled-back
+  (let ((original (fdefinition 'lifecycle-probe)))
+    (unwind-protect
+         (with-installed-set (ps (healthy-probe-set 'promote-then-seal))
+           (is (eq :promoting (promote ps :operator "unit-tests")))
+           (is (eq :promoted (wait-for-state ps '(:promoted) :timeout 15)))
+           (join-lifecycle-threads ps)
+           (is (equal '(:canary-50 :promoting :swapping :promoted)
+                      (last (state-trail ps) 4))
+               "trail was ~s" (state-trail ps))
+           (is (eq :sealed (seal-patch ps :operator "unit-tests")))
+           (signals illegal-transition (roll-back ps :operator "unit-tests"))
+           (is (eq :promoted (patch-set-state ps))))
+      (setf (fdefinition 'lifecycle-probe) original))))
+
+(test sealing-a-canarying-set-is-refused
+  (with-installed-set (ps (healthy-probe-set 'seal-mid-canary))
+    (signals illegal-transition (seal-patch ps :operator "unit-tests"))
+    (is-false (splice::patch-set-sealed ps))
+    (is (eq :canary-50 (patch-set-state ps)))))
+
+;;; Which operator requests each state allows, on bare sets: none of these
+;;; reach a transition, so nothing needs installing
+
+(defun bare-set (state)
+  (splice::make-patch-set :name 'bare :state state))
+
+(defun outcome-of (thunk)
+  "THUNK's value, or :REFUSED when it signals ILLEGAL-TRANSITION."
+  (handler-case (funcall thunk)
+    (illegal-transition () :refused)))
+
+(test operator-requests-on-each-state
+  (flet ((check (request states expected)
+           (dolist (state states)
+             (let ((ps (bare-set state)))
+               (is (eq expected (outcome-of (lambda () (funcall request ps))))
+                   "~a from ~a" request state)
+               (is (eq state (patch-set-state ps)))))))
+    (let ((freeze-it (lambda (ps) (freeze ps "probe" :operator "unit-tests")))
+          (roll-it-back (lambda (ps) (roll-back ps :operator "unit-tests")))
+          (promote-it (lambda (ps) (promote ps :operator "unit-tests")))
+          (seal-it (lambda (ps) (seal-patch ps :operator "unit-tests"))))
+      (check freeze-it '(:frozen) :no-change)
+      (check freeze-it '(:registered :restoring :swapping :rolled-back :promoted :vetoed)
+             :refused)
+      (check roll-it-back '(:rolling-back :restoring :rolled-back) :no-change)
+      (check roll-it-back '(:registered :promoting :swapping :promoted :vetoed) :refused)
+      (check promote-it '(:promoting :swapping :promoted) :no-change)
+      (check promote-it '(:registered :staged :rolling-back :restoring :rolled-back :vetoed)
+             :refused)
+      (check seal-it '(:registered :canary-5 :frozen :rolling-back :rolled-back) :refused))))
+
+;;; Completion threads give way to a freeze that lands during the drain.
+;;; Nothing is pinned, so the drain ends at once.
+
+(test a-rollback-thread-leaves-a-frozen-set-alone
+  (let ((ps (bare-set :frozen)))
+    (is (eq :abandoned (splice::complete-rollback ps)))
+    (is (eq :frozen (patch-set-state ps)))))
+
+(test a-promotion-thread-leaves-a-frozen-set-alone
+  (let ((ps (bare-set :frozen)))
+    (is (eq :abandoned (splice::complete-promotion ps)))
+    (is (eq :frozen (patch-set-state ps)))))

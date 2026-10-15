@@ -39,7 +39,7 @@ so it reproduces across images and from the audit log."
   "Route for a fresh task. Canarying sets draw against the ramp fraction,
 a promoting set pins :new, and anything else pins :old."
   (case (patch-set-state ps)
-    (:promoting :new)
+    ((:promoting :swapping) :new)
     (t (if (and (canary-stage-p (patch-set-state ps))
                 (< (routing-draw task-id (patch-set-name ps))
                    (patch-set-current-fraction ps)))

@@ -83,15 +83,26 @@
   (let ((s (symbol-name state)))
     (and (> (length s) 7) (string= "CANARY-" (subseq s 0 7)))))
 
+;; Rollback and promotion each take two states: the first until the drain
+;; ends (a freeze can still stop it), the second once the completion thread
+;; has claimed the set and started changing code.
+(defun rolling-back-p (state)
+  (member state '(:rolling-back :restoring)))
+
+(defun promoting-p (state)
+  (member state '(:promoting :swapping)))
+
 (defun active-canary-sets ()
   "Patch sets that fresh tasks must pin against: canary stages, plus
-:promoting (pins :new across the swap) and :rolling-back or :frozen (pin :old)."
+promoting ones (pin :new across the swap) and rolling-back or :frozen ones
+(pin :old)."
   (let ((out '()))
     (maphash (lambda (name ps)
                (declare (ignore name))
                (when (or (canary-stage-p (patch-set-state ps))
-                         (member (patch-set-state ps)
-                                 '(:rolling-back :frozen :promoting)))
+                         (rolling-back-p (patch-set-state ps))
+                         (promoting-p (patch-set-state ps))
+                         (eq :frozen (patch-set-state ps)))
                  (push ps out)))
              *patch-sets*)
     out))

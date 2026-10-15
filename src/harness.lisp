@@ -398,7 +398,7 @@ Expects an open audit log."
              ;; once decided, stop load so completion isn't mutex-starved
              (member (patch-set-state ps)
                      '(:promoted :rolled-back :frozen :vetoed
-                       :promoting :rolling-back))))
+                       :promoting :swapping :rolling-back :restoring))))
       (if (> threads 1)
           ;; threads don't inherit dynamic bindings: rebind the shared
           ;; fault and give each worker its own PRNG

@@ -23,7 +23,8 @@
 (test finished-p
   (dolist (state '(:rolled-back :promoted :vetoed))
     (is-true (splice::finished-p (splice::make-patch-set :state state))))
-  (dolist (state '(:registered :staged :canary-5 :promoting :rolling-back :frozen))
+  (dolist (state '(:registered :staged :canary-5 :promoting :swapping
+                   :rolling-back :restoring :frozen))
     (is-false (splice::finished-p (splice::make-patch-set :state state)))))
 
 ;;; The draw
@@ -68,9 +69,12 @@
                (loop for task from 1 to 200 collect task)))))
 
 (test promoting-pins-new-and-everything-else-pins-old
-  (is (eq :new (splice::pin-route (set-in :promoting :fraction 0) 1)))
+  (dolist (state '(:promoting :swapping))
+    (is (eq :new (splice::pin-route (set-in state :fraction 0) 1))
+        "~s pinned :old" state))
   ;; a fraction left over from the canary must not leak into other states
-  (dolist (state '(:registered :staged :rolling-back :frozen :rolled-back :promoted))
+  (dolist (state '(:registered :staged :rolling-back :restoring :frozen
+                   :rolled-back :promoted))
     (is (eq :old (splice::pin-route (set-in state :fraction 100) 1))
         "~s pinned :new" state)))
 

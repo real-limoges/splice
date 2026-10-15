@@ -33,6 +33,7 @@
    ;; conditions & restarts
    #:splice-condition #:patch-vetoed #:canary-anomaly #:canary-verdict
    #:migration-failure #:rollback-initiated #:rollback-failure
+   #:illegal-transition
    #:fallback-to-old #:force-promote #:abort-patch
 
    ;; condition readers
