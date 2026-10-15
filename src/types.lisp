@@ -65,11 +65,6 @@
 (defun find-patch-set (name)
   (gethash name *patch-sets*))
 
-(defun canary-state-p (state)
-  (member state '(:canary-5 :canary-25 :canary-100
-                  ;; any :canary-<n> keyword from a custom ramp
-                  )))
-
 (defun stage-keyword (fraction)
   (intern (format nil "CANARY-~d" fraction) :keyword))
 
