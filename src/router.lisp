@@ -46,6 +46,15 @@ a promoting set pins :new, and anything else pins :old."
            :new
            :old))))
 
+(defun pin-and-count (ps task-id)
+  "Pin PS for a fresh task and count it in flight, all as one step."
+  (sb-thread:with-mutex ((patch-set-lock ps))
+    (let ((route (pin-route ps task-id)))
+      (if (eq route :new)
+          (incf (patch-set-pinned-new ps))
+          (incf (patch-set-pinned-old ps)))
+      (list ps route))))
+
 (defun task-route-for (ps)
   "The current task's pinned route for PS, or :old outside a task."
   (let ((pin (assoc ps *task-epochs* :test #'eq)))
@@ -89,18 +98,12 @@ at exit, and report the outcome to each pinned set. The FALLBACK-TO-OLD
 restart retries the whole task on old code."
   (let* ((*task-id* (or id (next-task-id)))
          (sets (active-canary-sets))
-         (*task-epochs* (mapcar (lambda (ps) (list ps (pin-route ps *task-id*)))
-                                sets))
+         (*task-epochs* (mapcar (lambda (ps) (pin-and-count ps *task-id*)) sets))
          (*task-shim-routes* '())
          (*task-anomaly-noted* '())
          (start (get-internal-real-time))
          (outcome :success)
          (condition nil))
-    (dolist (pin *task-epochs*)
-      (sb-thread:with-mutex ((patch-set-lock (car pin)))
-        (if (eq (cadr pin) :new)
-            (incf (patch-set-pinned-new (car pin)))
-            (incf (patch-set-pinned-old (car pin))))))
     ;; sampled pins, enough to re-derive routing offline
     (when (and *task-epochs* (integerp *task-id*)
                (zerop (mod *task-id* *task-sample-every*)))
