@@ -49,7 +49,6 @@
   (pinned-new 0) (pinned-old 0)   ; in-flight task counts, per route
   (hard-trigger nil)          ; set by anomaly capture; forces rollback
   (history '())               ; (state . timestamp) transitions, newest first
-  (mixed-executions 0)        ; coherence violations observed (must stay 0)
   (freeze-reason nil)
   (last-reversal-report nil)  ; reversal counts from the last rollback
   (sealed nil))               ; journal released; rollback no longer offered
@@ -67,6 +66,18 @@
 
 (defun stage-keyword (fraction)
   (intern (format nil "CANARY-~d" fraction) :keyword))
+
+(defun arm-hard-trigger (ps trigger)
+  "Arm PS's hard trigger unless one is already armed; the first cause wins."
+  (sb-ext:compare-and-swap (patch-set-hard-trigger ps) nil trigger))
+
+(defun take-hard-trigger (ps)
+  "PS's armed trigger or NIL, leaving the slot clear."
+  (loop for seen = (patch-set-hard-trigger ps)
+        when (or (null seen)
+                 (eq   seen (sb-ext:compare-and-swap (patch-set-hard-trigger ps)
+                                                     seen nil)))
+          return seen))
 
 (defun canary-stage-p (state)
   (let ((s (symbol-name state)))

@@ -99,9 +99,8 @@ transition. Returns the action taken: :continue when nothing changed, else
         (return-from report-outcome :continue))
       ;; hard triggers fire on any route: a migration failure can surface in
       ;; an old-routed task, and at 5% the next canary task may be far off
-      (let ((trigger (patch-set-hard-trigger ps)))
+      (let ((trigger (take-hard-trigger ps)))
         (when trigger
-          (setf (patch-set-hard-trigger ps) nil)
           (return-from report-outcome
             (initiate-rollback-locked ps (cons :hard-trigger trigger)))))
       (cond

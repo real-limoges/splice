@@ -14,8 +14,8 @@ the pin at exit.")
 (defvar *task-anomaly-noted* nil
   "Alist (patch-set . t) of sets whose anomaly this task already recorded,
 so an error unwinding through nested shims counts once.")
-(defvar *task-counter* 0)
-(defvar *task-counter-lock* (sb-thread:make-mutex))
+(defvar *task-counter-cell* (list 0)
+  "Task ids handed out so far. A cons for ATOMIC-INCF.")
 (defvar *task-sample-every* 50
   "Log every Nth task's pinned routes to the audit log.")
 
@@ -25,8 +25,7 @@ so an error unwinding through nested shims counts once.")
 (defun note-mixed-execution () (sb-ext:atomic-incf (car *mixed-execution-cell*)))
 
 (defun next-task-id ()
-  (sb-thread:with-mutex (*task-counter-lock*)
-    (incf *task-counter*)))
+  (1+ (sb-ext:atomic-incf (car *task-counter-cell*))))
 
 (defun routing-draw (task-id set-name)
   "Deterministic draw in [0,100) per (task, set). SHA-256 rather than SXHASH
@@ -63,8 +62,6 @@ a promoting set pins :new, and anything else pins :old."
            (push (cons ps route) *task-shim-routes*))
           ((not (eq (cdr prior) route))
            (note-mixed-execution)
-           (sb-thread:with-mutex ((patch-set-lock ps))
-             (incf (patch-set-mixed-executions ps)))
            (audit :coherence-violation
                   :patch-set (patch-set-name ps) :task *task-id*
                   :pinned (cdr prior) :observed route)))))
@@ -81,11 +78,10 @@ conditions and migration failures arm the hard trigger."
            :cause-type (string (type-of condition))))
   (when (or (typep condition 'storage-condition)
             (typep condition 'migration-failure))
-    (setf (patch-set-hard-trigger ps)
-          (list (if (typep condition 'storage-condition)
-                    :storage-condition
-                    :migration-failure)
-                (princ-to-string condition)))))
+    (arm-hard-trigger ps (list (if (typep condition 'storage-condition)
+                                   :storage-condition
+                                   :migration-failure)
+                               (princ-to-string condition)))))
 
 (defun call-with-task (id thunk &key (swallow-errors nil))
   "Run THUNK as one task: pin routes, count in-flight tasks, check coherence

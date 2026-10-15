@@ -189,7 +189,7 @@ what the rollback left behind."
 (defun run-session (&rest args)
   "RUN-CANARY-SESSION, adding the session's mixed executions to the run total."
   (let ((r (apply #'run-canary-session args)))
-    (incf *mixed-executions* (session-result-mixed-executions r))
+    (incf *mixed-executions* (coherence-violations))
     r))
 
 (defun check-flagship ()
@@ -214,8 +214,8 @@ what the rollback left behind."
       (check "Flagship: journal-exact restorations occurred (instances were
 migrated forward mid-canary, then restored)"
              (and rev (plusp (getf rev :journal-exact))) rev))
-    (check "Flagship: zero mixed executions" (zerop (session-result-mixed-executions r))
-           (session-result-mixed-executions r))))
+    (check "Flagship: zero mixed executions" (zerop (coherence-violations))
+           (coherence-violations))))
 
 ;;; C4: post-rollback workload identical to never-patched control
 
@@ -251,9 +251,9 @@ migrated forward mid-canary, then restored)"
                                     :threads (or threads 1) :quiet t))
              (state (session-result-final-state r)))
         (push state (batch-final-states b))
-        (unless (zerop (session-result-mixed-executions r))
+        (unless (zerop (coherence-violations))
           (check (format nil "~a run ~a: mixed executions" kind i) nil
-                 (session-result-mixed-executions r)))
+                 (coherence-violations)))
         (when (eq state :rolled-back)
           (incf (batch-caught b))
           (push (session-result-detection-observations r) (batch-detect-ns b))

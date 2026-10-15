@@ -300,7 +300,7 @@ serves every session."
 ;;; Session driver
 
 (defstruct session-result
-  final-state transitions tasks-run mixed-executions veto-p
+  final-state transitions tasks-run veto-p
   detection-observations reversal-report pre-existing-snapshot
   post-rollback-comparison wallclock-ms)
 
@@ -426,7 +426,6 @@ Expects an open audit log."
              :final-state (patch-set-state ps)
              :transitions (patch-set-lifecycle-history ps)
              :tasks-run (car tasks-run)
-             :mixed-executions (splice::mixed-execution-count)
              :detection-observations (detection-observations-from-audit audit-start-seq)
              :reversal-report (reverse-migration-report 'currency-migration)
              :pre-existing-snapshot pre-snapshot
