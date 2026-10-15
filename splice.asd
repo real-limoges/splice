@@ -21,7 +21,27 @@ hash-chained log."
                              (:file "lifecycle")
                              (:file "harness")
                              (:file "cluster"))))
-  :in-order-to ((test-op (test-op "splice/criteria"))))
+  :in-order-to ((test-op (test-op "splice/tests"))))
+
+(defsystem "splice/tests"
+  :description "Unit tests. Fast enough to run on every change; the criteria
+run is (asdf:test-system \"splice/criteria\")."
+  :depends-on ("splice" "fiveam")
+  :serial t
+  :components ((:module "test/unit"
+                :components ((:file "package")
+                             (:file "sha256")
+                             (:file "sprt")
+                             (:file "router")
+                             (:file "audit")
+                             (:file "patch")
+                             (:file "migration"))))
+  :perform (test-op (o c)
+                    (declare (ignore o c))
+                    (unless (uiop:symbol-call :fiveam :run!
+                                              (uiop:find-symbol* :splice-tests
+                                                                 :splice-tests))
+                      (error "splice unit tests failed"))))
 
 (defsystem "splice/criteria"
   :description "Executes every success criterion and writes

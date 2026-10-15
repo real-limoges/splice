@@ -3,7 +3,7 @@
 ;;;;
 ;;;;   sbcl --non-interactive --eval '(require :asdf)' \
 ;;;;        --eval '(asdf:load-asd (truename "splice.asd"))' \
-;;;;        --eval '(asdf:test-system "splice")'              ; full (~2-4 min)
+;;;;        --eval '(asdf:test-system "splice/criteria")'     ; full (~2-4 min)
 ;;;;
 ;;;; SPLICE_RUNS=20 in the environment gives a quicker run. TEST-OP signals
 ;;;; an error when any criterion fails, so a non-interactive run exits
