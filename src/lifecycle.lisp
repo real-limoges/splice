@@ -59,7 +59,7 @@ stage. Signals PATCH-VETOED, installing nothing, if any contract fails."
     ;; shims start dormant, routing :old until the stage flip
     (install-fn-shims ps)
     (install-method-shims ps)
-    (sb-thread:with-mutex ((patch-set-lock ps))
+    (with-set-lock (ps)
       (setf (patch-set-state ps) :staged)
       (push (cons :staged (get-universal-time)) (patch-set-history ps))
       (audit :install :patch-set (patch-set-name ps)
@@ -91,34 +91,37 @@ the baseline; canary (:new) outcomes feed the SPRTs and may trigger a
 transition. Returns the action taken: :continue when nothing changed, else
 :advanced, :promoting, :rolling-back or :frozen."
   (declare (ignorable condition))
-  (sb-thread:with-mutex ((patch-set-lock ps))
-    (let ((ring (patch-set-control-ring ps)))
-      (unless (canary-stage-p (patch-set-state ps))
-        (when (and ring (eq route :old))
-          (control-record ring failure-p latency-ms))
-        (return-from report-outcome :continue))
-      ;; hard triggers fire on any route: a migration failure can surface in
-      ;; an old-routed task, and at 5% the next canary task may be far off
-      (let ((trigger (patch-set-hard-trigger ps)))
-        (when trigger
-          (setf (patch-set-hard-trigger ps) nil)
-          (return-from report-outcome
-            (initiate-rollback-locked ps (cons :hard-trigger trigger)))))
-      (cond
-        ((eq route :old)
-         (control-record ring failure-p latency-ms)
-         ;; refresh H0 from the live control arm
-         (let ((rate (control-failure-rate ring)))
-           (when rate
-             (unless (sprt-fixed-p0 (patch-set-sprt-error ps))
-               (sprt-set-p0 (patch-set-sprt-error ps) (max rate 1d-3)))
-             ;; a degraded control arm makes any canary verdict meaningless
-             (when (> rate (patch-set-confound-threshold ps))
-               (freeze-locked ps (list :confounded :control-rate rate))
-               (return-from report-outcome :frozen))))
-         :continue)
-        (t                              ; :new, a canary observation
-         (evaluate-canary-observation ps failure-p latency-ms))))))
+  (with-set-lock (ps)
+    (report-outcome-locked ps route failure-p latency-ms)))
+
+(defun report-outcome-locked (ps route failure-p latency-ms)
+  "The locked stuff"
+  (let ((ring (patch-set-control-ring ps)))
+    (unless (canary-stage-p (patch-set-state ps))
+      (when (and ring (eq route :old))
+        (control-record ring failure-p latency-ms))
+      (return-from report-outcome-locked :continue))
+    ;; hard triggers fire on any route: a migration failure can surface in
+    ;; an old-routed task, and at 5% the next canary task may be far off
+    (let ((trigger (take-hard-trigger ps)))
+      (when trigger
+        (return-from report-outcome-locked
+          (initiate-rollback-locked ps (cons :hard-trigger trigger)))))
+    (cond
+      ((eq route :old)
+       (control-record ring failure-p latency-ms)
+       ;; refresh H0 from the live control arm
+       (let ((rate (control-failure-rate ring)))
+         (when rate
+           (unless (sprt-fixed-p0 (patch-set-sprt-error ps))
+             (sprt-set-p0 (patch-set-sprt-error ps) (max rate 1d-3)))
+           ;; a degraded control arm makes any canary verdict meaningless
+           (when (> rate (patch-set-confound-threshold ps))
+             (freeze-locked ps (list :confounded :control-rate rate))
+             (return-from report-outcome-locked :frozen))))
+       :continue)
+      (t                              ; :new, a canary observation
+       (evaluate-canary-observation ps failure-p latency-ms)))))
 
 (defun evaluate-canary-observation (ps failure-p latency-ms)
   "Caller holds the lock; hard triggers were already checked upstream."
@@ -146,16 +149,16 @@ transition. Returns the action taken: :continue when nothing changed, else
       ((or (eq err-verdict :reject) (eq lat-verdict :reject))
        (let ((stream (if (eq err-verdict :reject) :errors :latency))
              (sprt (if (eq err-verdict :reject) err-sprt lat-sprt)))
-         (signal 'canary-verdict :patch-set ps :stream-kind stream
-                                 :direction :reject
-                                 :n (sprt-n sprt) :llr (sprt-llr sprt))
+         (defer (lambda () (signal 'canary-verdict :patch-set ps :stream-kind stream
+                                                   :direction :reject
+                                                   :n (sprt-n sprt) :llr (sprt-llr sprt))))
          (initiate-rollback-locked
           ps (list :sprt-reject (sprt-snapshot sprt stream)))))
       ;; stage advances only when both streams accept health
       ((and (eq err-verdict :accept) (eq lat-verdict :accept))
-       (signal 'canary-verdict :patch-set ps :stream-kind :both
-                               :direction :accept
-                               :n (sprt-n err-sprt) :llr (sprt-llr err-sprt))
+       (defer (lambda () (signal 'canary-verdict :patch-set ps :stream-kind :both
+                                                 :direction :accept
+                                                 :n (sprt-n err-sprt) :llr (sprt-llr err-sprt))))
        (if (< (1+ (patch-set-stage-index ps)) (length (patch-set-ramp ps)))
            (progn (enter-stage ps (1+ (patch-set-stage-index ps)))
                   :advanced)
@@ -186,10 +189,10 @@ class reversal needs an operator."
   (audit :rollback-decision :patch-set (patch-set-name ps) :trigger trigger
                             :pinned-new (patch-set-pinned-new ps)
                             :pinned-old (patch-set-pinned-old ps))
-  (signal 'rollback-initiated :patch-set ps :trigger trigger)
-  (sb-thread:make-thread (lambda () (complete-rollback ps))
-                         :name (format nil "splice-rollback-~a"
-                                       (patch-set-name ps)))
+  (defer (lambda () (signal 'rollback-initiated :patch-set ps :trigger trigger)))
+  (defer (lambda () (sb-thread:make-thread (lambda () (complete-rollback ps))
+                                           :name (format nil "splice-rollback-~a"
+                                                         (patch-set-name ps)))))
   :rolling-back)
 
 (defun wait-for-drain (counter-fn timeout-seconds)
@@ -201,15 +204,59 @@ class reversal needs an operator."
         do (sleep 0.005)
         finally (return t)))
 
+(defun claim-transition (ps from to)
+  "Move PS from FROM to TO, unless something else moved it first. Returns
+:claimed or :abandoned."
+  (with-set-lock (ps)
+    (if (eq (patch-set-state ps) from)
+        (progn (transition ps to) :claimed)
+        (abandon-locked ps from to))))
+
+(defun freeze-from (ps from reason)
+  "Freeze PS if it is still in FROM. Returns :frozen or :abandoned."
+  (with-set-lock (ps)
+    (if (eq (patch-set-state ps) from)
+        (progn (freeze-locked ps reason) :frozen)
+        (abandon-locked ps from :frozen))))
+
+(defun abandon-locked (ps expected wanted)
+  "Audit a completion thread giving way to a state change it did not make."
+  (audit :transition-abandoned :patch-set (patch-set-name ps)
+                               :expected expected
+                               :found (patch-set-state ps)
+                               :wanted wanted)
+  :abandoned)
+
 (defun complete-rollback (ps)
-  "Drain :new-pinned tasks, restore the old world, reverse-migrate, verify."
+  "Drain :new-pinned tasks, then claim the set and restore the old world. A
+set that left :rolling-back during the drain (an operator freeze, say) is
+left alone. Returns :rolled-back, :frozen or :abandoned."
+  (cond ((not (wait-for-drain (lambda () (patch-set-pinned-new ps))
+                              *drain-timeout-seconds*))
+         (fail-rollback ps :rolling-back
+                        (make-condition 'rollback-failure
+                                        :patch-set ps
+                                        :cause (format nil ":new-pinned tasks failed to drain in ~as"
+                                                       *drain-timeout-seconds*))))
+        ((eq :claimed (claim-transition ps :rolling-back :restoring))
+         (restore-old-world ps))
+        (t :abandoned)))
+
+(defun fail-rollback (ps from failure)
+  "The safety net itself failed: freeze PS for a human, unless it already
+left FROM. Returns :frozen or :abandoned."
+  (let ((outcome (freeze-from ps from
+                              (list :rollback-failure (princ-to-string failure)))))
+    (when (eq outcome :frozen)
+      (audit :rollback-failed :patch-set (patch-set-name ps)
+                              :cause (princ-to-string failure)))
+    outcome))
+
+(defun restore-old-world (ps)
+  "Swap the old functions and classes back in, reverse-migrate, verify. Runs
+in :restoring, which an operator cannot move the set out of."
   (handler-case
       (progn
-        (unless (wait-for-drain (lambda () (patch-set-pinned-new ps))
-                                *drain-timeout-seconds*)
-          (error 'rollback-failure :patch-set ps
-                                   :cause (format nil ":new-pinned tasks failed to drain in ~as"
-                                                  *drain-timeout-seconds*)))
         (remove-fn-shims ps :world :old)
         (remove-method-shims ps :world :old)
         (let ((reversal-reports
@@ -226,47 +273,54 @@ class reversal needs an operator."
                                        :cause (format nil "fdefinitions not restored: ~a"
                                                       (mapcar #'fn-patch-name unrestored)))))
           (setf (patch-set-last-reversal-report ps) reversal-reports)
-          (sb-thread:with-mutex ((patch-set-lock ps))
+          (with-set-lock (ps)
             (transition ps :rolled-back))
           (audit :rollback-complete :patch-set (patch-set-name ps)
                                     :restoration-verified t
-                                    :reversal reversal-reports)))
+                                    :reversal reversal-reports)
+          :rolled-back))
     (rollback-failure (e)
-      ;; the safety net itself failed: stop escalating, page a human
-      (sb-thread:with-mutex ((patch-set-lock ps))
-        (freeze-locked ps (list :rollback-failure (princ-to-string e))))
-      (audit :rollback-failed :patch-set (patch-set-name ps)
-                              :cause (princ-to-string e)))))
+      (fail-rollback ps :restoring e))))
 
 ;;; ---------------------------------------------------------------------
 ;;; Promotion
 
 (defun begin-promotion-locked (ps)
   (transition ps :promoting)
-  (sb-thread:make-thread (lambda () (complete-promotion ps))
-                         :name (format nil "splice-promote-~a"
-                                       (patch-set-name ps))))
+  (defer (lambda () (sb-thread:make-thread (lambda () (complete-promotion ps))
+                                           :name (format nil "splice-promote-~a"
+                                                         (patch-set-name ps))))))
 
 (defun complete-promotion (ps)
-  "Quiescence check, then the destructive install of the new world."
+  "Quiescence check, then claim the set and swap in the new world. A set
+that left :promoting during the drain is left alone. Returns :promoted or
+:abandoned."
   (let ((drained (wait-for-drain (lambda () (patch-set-pinned-old ps))
                                  *drain-timeout-seconds*)))
     ;; undrained tasks are only noted: old code stays valid up to the swap
     (unless drained
       (audit :promotion-quiescence :patch-set (patch-set-name ps)
                                    :unswitched-old-pinned (patch-set-pinned-old ps)))
-    (remove-fn-shims ps :world :new)
-    (remove-method-shims ps :world :new)
-    (dolist (cp (patch-set-class-patches ps))
-      (promote-class-patch ps cp))
-    (sb-thread:with-mutex ((patch-set-lock ps))
-      (transition ps :promoted))
-    (audit :promotion :patch-set (patch-set-name ps)
-                      :functions (mapcar (lambda (fp)
-                                           (list :name (fn-patch-name fp)
-                                                 :installed (fn-patch-new-source-hash fp)))
-                                         (patch-set-fn-patches ps))
-                      :journal-retained (migration-journal-count))))
+    (if (eq :claimed (claim-transition ps :promoting :swapping))
+        (swap-in-new-world ps)
+        :abandoned)))
+
+(defun swap-in-new-world (ps)
+  "The destructive install of the new world. Runs in :swapping, which an
+operator cannot move the set out of."
+  (remove-fn-shims ps :world :new)
+  (remove-method-shims ps :world :new)
+  (dolist (cp (patch-set-class-patches ps))
+    (promote-class-patch ps cp))
+  (with-set-lock (ps)
+    (transition ps :promoted))
+  (audit :promotion :patch-set (patch-set-name ps)
+                    :functions (mapcar (lambda (fp)
+                                         (list :name (fn-patch-name fp)
+                                               :installed (fn-patch-new-source-hash fp)))
+                                       (patch-set-fn-patches ps))
+                    :journal-retained (migration-journal-count))
+  :promoted)
 
 ;;; ---------------------------------------------------------------------
 ;;; Operator entry points and FROZEN handling
@@ -280,16 +334,36 @@ class reversal needs an operator."
 (defun resolve-patch-set (name-or-ps)
   (if (patch-set-p name-or-ps) name-or-ps (find-patch-set name-or-ps)))
 
+(defun refuse-locked (ps requested)
+  "Signal ILLEGAL-TRANSITION once the lock is released, so its handlers run
+outside it. Returns :refused, which the caller never sees."
+  (let ((from (patch-set-state ps)))
+    (defer (lambda ()
+             (error 'illegal-transition :patch-set ps :from from
+                                        :requested requested))))
+  :refused)
+
 (defun freeze (name reason &key (operator "unspecified"))
+  "Stop a set where it is for an operator. Refused once a completion thread
+has claimed the set (:restoring, :swapping) or the set has finished."
   (let ((ps (resolve-patch-set name)))
-    (sb-thread:with-mutex ((patch-set-lock ps))
-      (freeze-locked ps (list :operator operator :reason reason)))))
+    (with-set-lock (ps)
+      (freeze-operator-locked ps (list :operator operator :reason reason)))))
+
+(defun freeze-operator-locked (ps reason)
+  (let ((state (patch-set-state ps)))
+    (cond ((eq state :frozen) :no-change)
+          ((or (canary-stage-p state)
+               (member state '(:staged :rolling-back :promoting)))
+           (freeze-locked ps reason)
+           :frozen)
+          (t (refuse-locked ps :freeze)))))
 
 (defun unfreeze (name decision &key (operator "unspecified"))
   "Resolve a FROZEN set: DECISION is :resume, :rollback, or :promote.
 Every resolution is audited with the operator's identity."
   (let ((ps (resolve-patch-set name)))
-    (sb-thread:with-mutex ((patch-set-lock ps))
+    (with-set-lock (ps)
       (assert (eq (patch-set-state ps) :frozen))
       (audit :unfreeze :patch-set (patch-set-name ps)
                        :operator operator :decision decision
@@ -301,24 +375,54 @@ Every resolution is audited with the operator's identity."
         (:promote (begin-promotion-locked ps))))))
 
 (defun roll-back (name &key (operator "unspecified"))
-  "Operator-initiated rollback of a canarying set."
+  "Operator-initiated rollback of a canarying, staged or frozen set. Quiet
+when the set is already rolling back or rolled back; refused otherwise, and
+always once sealed."
   (let ((ps (resolve-patch-set name)))
-    (sb-thread:with-mutex ((patch-set-lock ps))
-      (initiate-rollback-locked ps (list :operator operator)))))
+    (with-set-lock (ps)
+      (roll-back-locked ps operator))))
+
+(defun roll-back-locked (ps operator)
+  (let ((state (patch-set-state ps)))
+    (cond ((or (rolling-back-p state) (eq state :rolled-back)) :no-change)
+          ((patch-set-sealed ps) (refuse-locked ps :roll-back))
+          ((or (canary-stage-p state) (member state '(:staged :frozen)))
+           (initiate-rollback-locked ps (list :operator operator)))
+          (t (refuse-locked ps :roll-back)))))
 
 (defun promote (name &key (operator "unspecified"))
-  "Operator-forced promotion (bypasses remaining ramp stages)."
+  "Operator-forced promotion of a canarying or frozen set (bypasses remaining
+ramp stages). Quiet when the set is already promoting or promoted; refused
+otherwise."
   (let ((ps (resolve-patch-set name)))
-    (sb-thread:with-mutex ((patch-set-lock ps))
-      (audit :force-promote :patch-set (patch-set-name ps) :operator operator)
-      (begin-promotion-locked ps))))
+    (with-set-lock (ps)
+      (promote-locked ps operator))))
+
+(defun promote-locked (ps operator)
+  (let ((state (patch-set-state ps)))
+    (cond ((or (promoting-p state) (eq state :promoted)) :no-change)
+          ((or (canary-stage-p state) (eq state :frozen))
+           (audit :force-promote :patch-set (patch-set-name ps) :operator operator)
+           (begin-promotion-locked ps)
+           :promoting)
+          (t (refuse-locked ps :promote)))))
 
 (defun seal-patch (name &key (operator "unspecified"))
-  "Release the migration journal; rollback of this set is no longer offered."
+  "Release a promoted set's migration journal; rollback of this set is no
+longer offered."
   (let ((ps (resolve-patch-set name)))
-    (setf (patch-set-sealed ps) t)
-    (audit :sealed :patch-set (patch-set-name ps) :operator operator)
-    (seal-class-journal ps)))
+    (with-set-lock (ps)
+      (seal-locked ps operator))))
+
+(defun seal-locked (ps operator)
+  (cond ((patch-set-sealed ps) :no-change)
+        ((eq :promoted (patch-set-state ps))
+         (setf (patch-set-sealed ps) t)
+         (audit :sealed :patch-set (patch-set-name ps) :operator operator)
+         ;; outside the set lock, so the migration lock never nests in it
+         (defer (lambda () (seal-class-journal ps)))
+         :sealed)
+        (t (refuse-locked ps :seal))))
 
 (defun reverse-migration-report (name)
   "The reversal counts recorded by the last completed rollback of NAME."

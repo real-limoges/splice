@@ -33,6 +33,7 @@
    ;; conditions & restarts
    #:splice-condition #:patch-vetoed #:canary-anomaly #:canary-verdict
    #:migration-failure #:rollback-initiated #:rollback-failure
+   #:illegal-transition
    #:fallback-to-old #:force-promote #:abort-patch
 
    ;; condition readers
@@ -67,7 +68,7 @@
 
    ;; session results
    #:session-result #:session-result-final-state #:session-result-transitions
-   #:session-result-mixed-executions #:session-result-tasks-run
+   #:session-result-tasks-run
    #:session-result-detection-observations #:session-result-veto-p
    #:session-result-reversal-report #:session-result-pre-existing-snapshot
    #:session-result-post-rollback-comparison #:session-result-wallclock-ms

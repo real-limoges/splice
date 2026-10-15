@@ -14,8 +14,8 @@ the pin at exit.")
 (defvar *task-anomaly-noted* nil
   "Alist (patch-set . t) of sets whose anomaly this task already recorded,
 so an error unwinding through nested shims counts once.")
-(defvar *task-counter* 0)
-(defvar *task-counter-lock* (sb-thread:make-mutex))
+(defvar *task-counter-cell* (list 0)
+  "Task ids handed out so far. A cons for ATOMIC-INCF.")
 (defvar *task-sample-every* 50
   "Log every Nth task's pinned routes to the audit log.")
 
@@ -25,8 +25,7 @@ so an error unwinding through nested shims counts once.")
 (defun note-mixed-execution () (sb-ext:atomic-incf (car *mixed-execution-cell*)))
 
 (defun next-task-id ()
-  (sb-thread:with-mutex (*task-counter-lock*)
-    (incf *task-counter*)))
+  (1+ (sb-ext:atomic-incf (car *task-counter-cell*))))
 
 (defun routing-draw (task-id set-name)
   "Deterministic draw in [0,100) per (task, set). SHA-256 rather than SXHASH
@@ -40,12 +39,21 @@ so it reproduces across images and from the audit log."
   "Route for a fresh task. Canarying sets draw against the ramp fraction,
 a promoting set pins :new, and anything else pins :old."
   (case (patch-set-state ps)
-    (:promoting :new)
+    ((:promoting :swapping) :new)
     (t (if (and (canary-stage-p (patch-set-state ps))
                 (< (routing-draw task-id (patch-set-name ps))
                    (patch-set-current-fraction ps)))
            :new
            :old))))
+
+(defun pin-and-count (ps task-id)
+  "Pin PS for a fresh task and count it in flight, all as one step."
+  (with-set-lock (ps)
+    (let ((route (pin-route ps task-id)))
+      (if (eq route :new)
+          (incf (patch-set-pinned-new ps))
+          (incf (patch-set-pinned-old ps)))
+      (list ps route))))
 
 (defun task-route-for (ps)
   "The current task's pinned route for PS, or :old outside a task."
@@ -63,8 +71,6 @@ a promoting set pins :new, and anything else pins :old."
            (push (cons ps route) *task-shim-routes*))
           ((not (eq (cdr prior) route))
            (note-mixed-execution)
-           (sb-thread:with-mutex ((patch-set-lock ps))
-             (incf (patch-set-mixed-executions ps)))
            (audit :coherence-violation
                   :patch-set (patch-set-name ps) :task *task-id*
                   :pinned (cdr prior) :observed route)))))
@@ -81,11 +87,10 @@ conditions and migration failures arm the hard trigger."
            :cause-type (string (type-of condition))))
   (when (or (typep condition 'storage-condition)
             (typep condition 'migration-failure))
-    (setf (patch-set-hard-trigger ps)
-          (list (if (typep condition 'storage-condition)
-                    :storage-condition
-                    :migration-failure)
-                (princ-to-string condition)))))
+    (arm-hard-trigger ps (list (if (typep condition 'storage-condition)
+                                   :storage-condition
+                                   :migration-failure)
+                               (princ-to-string condition)))))
 
 (defun call-with-task (id thunk &key (swallow-errors nil))
   "Run THUNK as one task: pin routes, count in-flight tasks, check coherence
@@ -93,18 +98,12 @@ at exit, and report the outcome to each pinned set. The FALLBACK-TO-OLD
 restart retries the whole task on old code."
   (let* ((*task-id* (or id (next-task-id)))
          (sets (active-canary-sets))
-         (*task-epochs* (mapcar (lambda (ps) (list ps (pin-route ps *task-id*)))
-                                sets))
+         (*task-epochs* (mapcar (lambda (ps) (pin-and-count ps *task-id*)) sets))
          (*task-shim-routes* '())
          (*task-anomaly-noted* '())
          (start (get-internal-real-time))
          (outcome :success)
          (condition nil))
-    (dolist (pin *task-epochs*)
-      (sb-thread:with-mutex ((patch-set-lock (car pin)))
-        (if (eq (cadr pin) :new)
-            (incf (patch-set-pinned-new (car pin)))
-            (incf (patch-set-pinned-old (car pin))))))
     ;; sampled pins, enough to re-derive routing offline
     (when (and *task-epochs* (integerp *task-id*)
                (zerop (mod *task-id* *task-sample-every*)))
@@ -143,7 +142,7 @@ restart retries the whole task on old code."
           (note-mixed-execution)))
       ;; release pins before reporting: a rollback would wait on these counts
       (dolist (pin *task-epochs*)
-        (sb-thread:with-mutex ((patch-set-lock (car pin)))
+        (with-set-lock ((car pin))
           (if (eq (cadr pin) :new)
               (decf (patch-set-pinned-new (car pin)))
               (decf (patch-set-pinned-old (car pin))))))

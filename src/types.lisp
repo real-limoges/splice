@@ -49,7 +49,6 @@
   (pinned-new 0) (pinned-old 0)   ; in-flight task counts, per route
   (hard-trigger nil)          ; set by anomaly capture; forces rollback
   (history '())               ; (state . timestamp) transitions, newest first
-  (mixed-executions 0)        ; coherence violations observed (must stay 0)
   (freeze-reason nil)
   (last-reversal-report nil)  ; reversal counts from the last rollback
   (sealed nil))               ; journal released; rollback no longer offered
@@ -68,19 +67,55 @@
 (defun stage-keyword (fraction)
   (intern (format nil "CANARY-~d" fraction) :keyword))
 
+(defun arm-hard-trigger (ps trigger)
+  "Arm PS's hard trigger unless one is already armed; the first cause wins."
+  (sb-ext:compare-and-swap (patch-set-hard-trigger ps) nil trigger))
+
+(defun take-hard-trigger (ps)
+  "PS's armed trigger or NIL, leaving the slot clear."
+  (loop for seen = (patch-set-hard-trigger ps)
+        when (or (null seen)
+                 (eq   seen (sb-ext:compare-and-swap (patch-set-hard-trigger ps)
+                                                     seen nil)))
+          return seen))
+
 (defun canary-stage-p (state)
   (let ((s (symbol-name state)))
     (and (> (length s) 7) (string= "CANARY-" (subseq s 0 7)))))
 
+;; Rollback and promotion each take two states: the first until the drain
+;; ends (a freeze can still stop it), the second once the completion thread
+;; has claimed the set and started changing code.
+(defun rolling-back-p (state)
+  (member state '(:rolling-back :restoring)))
+
+(defun promoting-p (state)
+  (member state '(:promoting :swapping)))
+
 (defun active-canary-sets ()
   "Patch sets that fresh tasks must pin against: canary stages, plus
-:promoting (pins :new across the swap) and :rolling-back or :frozen (pin :old)."
+promoting ones (pin :new across the swap) and rolling-back or :frozen ones
+(pin :old)."
   (let ((out '()))
     (maphash (lambda (name ps)
                (declare (ignore name))
                (when (or (canary-stage-p (patch-set-state ps))
-                         (member (patch-set-state ps)
-                                 '(:rolling-back :frozen :promoting)))
+                         (rolling-back-p (patch-set-state ps))
+                         (promoting-p (patch-set-state ps))
+                         (eq :frozen (patch-set-state ps)))
                  (push ps out)))
              *patch-sets*)
     out))
+
+(defvar *deferred-effects*)             ; unbound outside WITH-SET-LOCK, so stray DEFER errors
+
+(defun defer (thunk)
+  "Run THUNK once the enclosing WITH-SET-LOCK releases"
+  (push thunk *deferred-effects*))
+
+(defmacro with-set-lock ((ps) &body body)
+  "BODY under PS's lock, then deferred effects (in order) after release."
+  `(let ((*deferred-effects* '()))
+     (multiple-value-prog1
+         (sb-thread:with-mutex ((patch-set-lock ,ps)) ,@body)
+       (mapc #'funcall (reverse *deferred-effects*)))))

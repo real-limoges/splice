@@ -153,7 +153,7 @@ Drives its own synthetic workload once committed."
                  (send-form stream (list :veto :reason (princ-to-string e))))))
             (:rollback
              (send-form stream
-                        (list (sb-thread:with-mutex ((splice::patch-set-lock ps))
+                        (list (splice::with-set-lock (ps)
                                 (if (splice::canary-stage-p (splice:patch-set-state ps))
                                     (splice::initiate-rollback-locked
                                      ps '(:conductor-command))
@@ -189,7 +189,7 @@ the conductor every 200 tasks."
              until (or (car stop)
                        (member (splice:patch-set-state ps)
                                '(:promoted :rolled-back :frozen
-                                 :promoting :rolling-back))
+                                 :promoting :swapping :rolling-back :restoring))
                        (> i 50000))
              do (splice:with-task (:id i :swallow-errors t)
                   (splice/harness:process-order
@@ -325,8 +325,9 @@ UPPER."
         (let ((pooled (reduce #'+ members :key #'member-state-latest-llr))
               (local-reject (find :rolled-back members
                                   :key #'member-state-terminal))
-              (local-rolling (find :rolling-back members
-                                   :key #'member-state-state)))
+              (local-rolling (find-if (lambda (state)
+                                        (member state '(:rolling-back :restoring)))
+                                      members :key #'member-state-state)))
           (when (and (not rollback-sent)
                      (or local-reject local-rolling (>= pooled upper)))
             (setf rollback-sent t)

@@ -60,6 +60,17 @@
                      (name-of (splice-condition-patch-set c))
                      (rollback-failure-cause c)))))
 
+;; Signaled when an operator asks for a transition the set's state rules out,
+;; such as promoting a rolled-back set or freezing one mid-restore.
+(define-condition illegal-transition (splice-condition error)
+  ((from :initarg :from :reader illegal-transition-from)
+   (requested :initarg :requested :reader illegal-transition-requested))
+  (:report (lambda (c stream)
+             (format stream "Cannot ~(~a~) ~a: it is ~a"
+                     (illegal-transition-requested c)
+                     (name-of (splice-condition-patch-set c))
+                     (illegal-transition-from c)))))
+
 ;; NAME-OF tolerates conditions built before the patch-set struct exists.
 (defun name-of (patch-set-or-nil)
   (if patch-set-or-nil (patch-set-name patch-set-or-nil) "<none>"))

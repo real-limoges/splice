@@ -142,8 +142,7 @@ Any error is a MIGRATION-FAILURE, a hard rollback trigger."
         ;; this, and no shim would see it
         (let ((ps (gethash (class-patch-class-name cp) *tracked-classes*)))
           (when ps
-            (setf (patch-set-hard-trigger ps)
-                  (list :migration-failure (princ-to-string e)))))
+            (arm-hard-trigger ps (list :migration-failure (princ-to-string e)))))
         (error 'migration-failure :instance instance :direction :forward
                                   :cause e)))))
 

@@ -35,7 +35,8 @@ run is (asdf:test-system \"splice/criteria\")."
                              (:file "router")
                              (:file "audit")
                              (:file "patch")
-                             (:file "migration"))))
+                             (:file "migration")
+                             (:file "lifecycle"))))
   :perform (test-op (o c)
                     (declare (ignore o c))
                     (unless (uiop:symbol-call :fiveam :run!
