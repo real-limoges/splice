@@ -48,7 +48,7 @@ a promoting set pins :new, and anything else pins :old."
 
 (defun pin-and-count (ps task-id)
   "Pin PS for a fresh task and count it in flight, all as one step."
-  (sb-thread:with-mutex ((patch-set-lock ps))
+  (with-set-lock (ps)
     (let ((route (pin-route ps task-id)))
       (if (eq route :new)
           (incf (patch-set-pinned-new ps))
@@ -142,7 +142,7 @@ restart retries the whole task on old code."
           (note-mixed-execution)))
       ;; release pins before reporting: a rollback would wait on these counts
       (dolist (pin *task-epochs*)
-        (sb-thread:with-mutex ((patch-set-lock (car pin)))
+        (with-set-lock ((car pin))
           (if (eq (cadr pin) :new)
               (decf (patch-set-pinned-new (car pin)))
               (decf (patch-set-pinned-old (car pin))))))

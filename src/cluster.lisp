@@ -153,7 +153,7 @@ Drives its own synthetic workload once committed."
                  (send-form stream (list :veto :reason (princ-to-string e))))))
             (:rollback
              (send-form stream
-                        (list (sb-thread:with-mutex ((splice::patch-set-lock ps))
+                        (list (splice::with-set-lock (ps)
                                 (if (splice::canary-stage-p (splice:patch-set-state ps))
                                     (splice::initiate-rollback-locked
                                      ps '(:conductor-command))

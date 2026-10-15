@@ -95,3 +95,16 @@
                  (push ps out)))
              *patch-sets*)
     out))
+
+(defvar *deferred-effects*)             ; unbound outside WITH-SET-LOCK, so stray DEFER errors
+
+(defun defer (thunk)
+  "Run THUNK once the enclosing WITH-SET-LOCK releases"
+  (push thunk *deferred-effects*))
+
+(defmacro with-set-lock ((ps) &body body)
+  "BODY under PS's lock, then deferred effects (in order) after release."
+  `(let ((*deferred-effects* '()))
+     (multiple-value-prog1
+         (sb-thread:with-mutex ((patch-set-lock ,ps)) ,@body)
+       (mapc #'funcall (reverse *deferred-effects*)))))
