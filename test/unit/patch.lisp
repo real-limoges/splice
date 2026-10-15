@@ -53,7 +53,7 @@
   (with-patch-set-names (arity-ok)
     (let ((ps (fn-patch-set 'arity-ok 'probe-two (lambda (a &optional b c)
                                                    (list a b c)))))
-      (is (null (register-veto ps)))
+      (is (eq :no-veto (register-veto ps)))
       (is (eq :registered (patch-set-state ps)))
       (is (eq ps (find-patch-set 'arity-ok)))
       (is (eq #'probe-two (splice::fn-patch-old-fn
@@ -91,8 +91,8 @@
     (let ((first-set (fn-patch-set 'finished-first 'probe-one (lambda (x) x))))
       (register-patch-set first-set)
       (setf (patch-set-state first-set) :rolled-back)
-      (is (null (register-veto (fn-patch-set 'finished-second 'probe-one
-                                             (lambda (x) x))))))))
+      (is (eq :no-veto (register-veto (fn-patch-set 'finished-second 'probe-one
+                                                    (lambda (x) x))))))))
 
 (test registration-is-audited
   (with-patch-set-names (audited)

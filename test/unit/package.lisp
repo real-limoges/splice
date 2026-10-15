@@ -67,6 +67,6 @@ happened, so one test's sets never overlap with the next test's."
    :contracts contracts))
 
 (defun veto-of (thunk)
-  "The PATCH-VETOED condition THUNK signals, or NIL when it returns."
-  (handler-case (progn (funcall thunk) nil)
+  "The PATCH-VETOED condition THUNK signals, or :NO-VETO when it returns."
+  (handler-case (progn (funcall thunk) :no-veto)
     (patch-vetoed (c) c)))
