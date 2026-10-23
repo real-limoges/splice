@@ -190,3 +190,22 @@
                    (loop for entry in (log-entries path)
                          when (eq :contract-result (getf entry :event))
                            collect (getf entry :verdict))))))))
+
+(test lambda-list-of-agrees-with-sb-introspect
+  (let* ((probe (splice::make-patch-set :name 'arity-probe))
+         (cases (list #'probe-one
+                      #'probe-two
+                      (compile nil '(lambda (a &optional b) (list a b)))
+                      (funcall (compile nil '(lambda (x) (lambda (a b) (+ a b x)))) 1)
+                      #'print-object
+                      (compile nil '(lambda (a &key k)
+                                     (declare (optimize (debug 0)))
+                                     (list a k))))))
+    (dolist (f cases)
+      (is (equal (multiple-value-list
+                  (splice::parse-arity (splice::lambda-list-of f)))
+                 (multiple-value-list
+                  (splice::parse-arity (sb-introspect:function-lambda-list f))))
+          "arity of ~a" f))))
+
+()
