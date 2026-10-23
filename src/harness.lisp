@@ -225,8 +225,8 @@ tolerable; the window is statistical."
                                       paired-fallback lossy)
   "Register a fresh flagship patch set. Faults come from *FAULT*, so one set
 serves every session."
-  (unregister-patch-set 'currency-migration)
-  (register-patch-set
+  (splice:unregister-patch-set 'currency-migration)
+  (splice:register-patch-set
    (splice::make-patch-set
     :name 'currency-migration
     :description "orders: float dollars -> rational minor units"
@@ -315,7 +315,7 @@ serves every session."
   (splice::eval-method-redefinition
    '(defmethod print-total ((order order) (stream stream))
      (format stream "$~,2f" (order-float-total order))))
-  (unregister-patch-set 'currency-migration)
+  (splice:unregister-patch-set 'currency-migration)
   (clrhash splice::*migration-registry*)
   (clrhash splice::*tracked-classes*)
   (sb-thread:with-mutex (splice::*migration-lock*)
@@ -373,8 +373,8 @@ Expects an open audit log."
               :paired-fallback paired-fallback))
          (tasks-run (list 0))
          (stop (list nil)))
-    (handler-case (install ps)
-      (patch-vetoed (e)
+    (handler-case (splice:install ps)
+      (splice:patch-vetoed (e)
         (return-from run-canary-session
           (make-session-result :final-state :vetoed :veto-p t
                                :transitions (princ-to-string e)))))
@@ -383,7 +383,7 @@ Expects an open audit log."
              (when (> threads 1) (sleep 0.0002))
              (when (fault-active-p :load-correlated)
                (fault-window-note *fault* :total))
-             (with-task (:id i :swallow-errors t)
+             (splice:with-task (:id i :swallow-errors t)
                (let ((o (if (zerop (mod i touch-pre-existing-every))
                             ;; touch old orders to drive forward migration
                             (nth (mod (rng-next task-rng) (length orders)) orders)
@@ -396,7 +396,7 @@ Expects an open audit log."
                  (process-order o))))
            (terminal-p ()
              ;; once decided, stop load so completion isn't mutex-starved
-             (member (patch-set-state ps)
+             (member (splice:patch-set-state ps)
                      '(:promoted :rolled-back :frozen :vetoed
                        :promoting :swapping :rolling-back :restoring))))
       (if (> threads 1)
@@ -420,17 +420,17 @@ Expects an open audit log."
           (loop for i from 1 to max-tasks
                 until (terminal-p)
                 do (run-one i rng) (setf (car tasks-run) i))))
-    (wait-for-state ps '(:promoted :rolled-back :frozen) :timeout 30)
+    (splice:wait-for-state ps '(:promoted :rolled-back :frozen) :timeout 30)
     (let ((result
             (make-session-result
-             :final-state (patch-set-state ps)
-             :transitions (patch-set-lifecycle-history ps)
+             :final-state (splice:patch-set-state ps)
+             :transitions (splice:patch-set-lifecycle-history ps)
              :tasks-run (car tasks-run)
              :detection-observations (detection-observations-from-audit audit-start-seq)
-             :reversal-report (reverse-migration-report 'currency-migration)
+             :reversal-report (splice:reverse-migration-report 'currency-migration)
              :pre-existing-snapshot pre-snapshot
              :post-rollback-comparison
-             (when (eq (patch-set-state ps) :rolled-back)
+             (when (eq (splice:patch-set-state ps) :rolled-back)
                (compare-rollback-exactness orders pre-snapshot ps))
              :wallclock-ms (round (* 1000 (- (get-internal-real-time) start))
                                   internal-time-units-per-second))))
@@ -488,7 +488,7 @@ is original, and pre-existing orders match their pre-patch snapshot."
   "Plain workload with no patch in flight (baseline / overhead measurement)."
   (let ((rng (make-rng seed)))
     (loop for i from 1 to tasks
-          do (with-task (:id i :swallow-errors t)
+          do (splice:with-task (:id i :swallow-errors t)
                (process-order (make-instance 'order
                                              :id i :item-count (rng-range rng 1 9)
                                              :unit-price (/ (rng-range rng 100 9999) 100.0)

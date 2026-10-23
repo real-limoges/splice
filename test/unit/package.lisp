@@ -10,7 +10,7 @@
 ;;;; is not exported.
 
 (defpackage #:splice-tests
-  (:use #:common-lisp #:fiveam #:splice)
+  (:use #:common-lisp #:fiveam)
   (:export #:splice-tests))
 (in-package #:splice-tests)
 
@@ -27,10 +27,10 @@
   "Run BODY with a fresh audit log open at PATH, bound to a local
 *AUDIT-LOG* so the global one is never touched. The file is deleted after."
   `(let ((,path (temp-log-path))
-         (*audit-log* nil))
-     (open-audit-log ,path)
+         (splice:*audit-log* nil))
+     (splice:open-audit-log ,path)
      (unwind-protect (progn ,@body)
-       (close-audit-log)
+       (splice:close-audit-log)
        (uiop:delete-file-if-exists ,path))))
 
 (defun log-entries (path)
@@ -49,7 +49,7 @@
   "Run BODY, then drop the patch sets NAMES from the registry whatever
 happened, so one test's sets never overlap with the next test's."
   `(unwind-protect (progn ,@body)
-     (dolist (name ',names) (unregister-patch-set name))))
+     (dolist (name ',names) (splice:unregister-patch-set name))))
 
 (defun contract (name check-fn)
   (splice::make-contract :name name :check-fn check-fn :source (list name)))
@@ -63,10 +63,10 @@ happened, so one test's sets never overlap with the next test's."
                       :name fn-name
                       :new-fn new-fn
                       :new-source (list fn-name :new)
-                      :new-source-hash (sha256-hex (string fn-name))))
+                      :new-source-hash (splice:sha256-hex (string fn-name))))
    :contracts contracts))
 
 (defun veto-of (thunk)
   "The PATCH-VETOED condition THUNK signals, or :NO-VETO when it returns."
   (handler-case (progn (funcall thunk) :no-veto)
-    (patch-vetoed (c) c)))
+    (splice:patch-vetoed (c) c)))

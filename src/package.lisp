@@ -50,7 +50,7 @@
    #:sha256-hex #:sha256-self-test))
 
 (defpackage #:splice/harness
-  (:use #:common-lisp #:splice)
+  (:use #:common-lisp)
   (:export
    #:run-workload #:run-canary-session #:make-rng #:rng-next #:rng-uniform
    #:rng-range
@@ -76,4 +76,5 @@
 
 (defpackage #:splice/cluster
   (:use #:common-lisp)
+  (:local-nicknames (#:h #:splice/harness))
   (:export #:run-member #:run-conductor #:currency-patch-spec))

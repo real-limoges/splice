@@ -44,17 +44,17 @@
 ;;; Writing entries
 
 (test audit-without-a-log-is-a-no-op
-  (let ((*audit-log* nil))
-    (is (null (audit :probe :n 1)))))
+  (let ((splice:*audit-log* nil))
+    (is (null (splice:audit :probe :n 1)))))
 
 (test audit-returns-sequence-numbers
   (with-audit-log (path)
-    (is (= 1 (audit :probe :n 1)))
-    (is (= 2 (audit :probe :n 2)))))
+    (is (= 1 (splice:audit :probe :n 1)))
+    (is (= 2 (splice:audit :probe :n 2)))))
 
 (test an-entry-carries-its-envelope-and-fields
   (with-audit-log (path)
-    (audit :probe :n 7 :note (format nil "two~%lines"))
+    (splice:audit :probe :n 7 :note (format nil "two~%lines"))
     (let ((entry (first (log-entries path))))
       (is (= 1 (getf entry :seq)))
       (is (string= "genesis" (getf entry :prev-hash)))
@@ -66,11 +66,11 @@
 
 (test each-entry-hashes-the-previous-line
   (with-audit-log (path)
-    (audit :probe :n 1)
-    (audit :probe :n 2)
+    (splice:audit :probe :n 1)
+    (splice:audit :probe :n 2)
     (destructuring-bind (first-line second-line) (log-lines path)
       (declare (ignore second-line))
-      (is (string= (sha256-hex first-line)
+      (is (string= (splice:sha256-hex first-line)
                    (getf (second (log-entries path)) :prev-hash))))))
 
 ;;; The chain
@@ -88,14 +88,14 @@
       (uiop:delete-file-if-exists copy))))
 
 (defun three-entry-log ()
-  (audit :probe :n 1)
-  (audit :probe :n 2)
-  (audit :probe :n 3))
+  (splice:audit :probe :n 1)
+  (splice:audit :probe :n 2)
+  (splice:audit :probe :n 3))
 
 (test an-untouched-chain-verifies
   (with-audit-log (path)
     (three-entry-log)
-    (is (equal '(t 3 nil) (multiple-value-list (verify-audit-chain path))))))
+    (is (equal '(t 3 nil) (multiple-value-list (splice:verify-audit-chain path))))))
 
 (test an-edited-entry-breaks-the-next-link
   (with-audit-log (path)
@@ -107,14 +107,14 @@
                 (uiop:frob-substrings (second lines) '(":N 2") ":N 9")
                 (third lines)))
       (lambda (copy)
-        (is (equal '(nil 2 3) (multiple-value-list (verify-audit-chain copy))))))))
+        (is (equal '(nil 2 3) (multiple-value-list (splice:verify-audit-chain copy))))))))
 
 (test a-deleted-entry-breaks-the-chain
   (with-audit-log (path)
     (three-entry-log)
     (with-tampered-copy path (lambda (lines) (list (first lines) (third lines)))
       (lambda (copy)
-        (is (equal '(nil 1 3) (multiple-value-list (verify-audit-chain copy))))))))
+        (is (equal '(nil 1 3) (multiple-value-list (splice:verify-audit-chain copy))))))))
 
 ;;; Reconstruction: the pure fold
 
@@ -216,10 +216,10 @@
 
 (test reconstruct-state-folds-a-written-log
   (with-audit-log (path)
-    (audit :patch-registered :patch-set 'rs :functions '((:name f)) :classes '(c))
-    (audit :install :patch-set 'rs)
-    (audit :promotion :patch-set 'rs)
-    (let ((state (reconstruct-state path)))
+    (splice:audit :patch-registered :patch-set 'rs :functions '((:name f)) :classes '(c))
+    (splice:audit :install :patch-set 'rs)
+    (splice:audit :promotion :patch-set 'rs)
+    (let ((state (splice:reconstruct-state path)))
       (is (eq :promoted (state-of state 'rs)))
       (is (equal '(:new rs) (impl-of state 'f)))
       (is (eq :new (shape-of state 'c))))))
@@ -229,4 +229,4 @@
     (three-entry-log)
     (with-tampered-copy path (lambda (lines) (list (first lines) (third lines)))
       (lambda (copy)
-        (signals error (reconstruct-state copy))))))
+        (signals error (splice:reconstruct-state copy))))))

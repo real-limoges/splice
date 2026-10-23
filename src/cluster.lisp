@@ -37,32 +37,32 @@ forms so members can refuse a mismatch."
   (let ((functions
           '((price-order
              (lambda (order)
-               (splice/harness::maybe-inject :price order
-                                             (if splice/harness::*fault-rng*
-                                                 (splice/harness::rng-uniform splice/harness::*fault-rng*)
-                                                 0.5))
-               (let ((cents (round (* 100 (splice/harness:order-item-count order)
-                                      (rational (splice/harness:order-unit-price order))))))
-                 (setf (slot-value order 'splice/harness::amount-minor-units) cents
-                       (splice/harness:order-status order) :priced)
-                 (splice/harness::write-through-float order cents)
+               (h::maybe-inject :price order
+                                (if h::*fault-rng*
+                                    (h::rng-uniform h::*fault-rng*)
+                                    0.5))
+               (let ((cents (round (* 100 (h:order-item-count order)
+                                      (rational (h:order-unit-price order))))))
+                 (setf (slot-value order 'h::amount-minor-units) cents
+                       (h:order-status order) :priced)
+                 (h::write-through-float order cents)
                  cents)))
             (apply-discount
              (lambda (order)
-               (splice/harness::maybe-inject :discount order 0.5)
-               (let ((cents (round (* (slot-value order 'splice/harness::amount-minor-units)
-                                      (splice/harness::discount-multiplier
-                                       (splice/harness:order-discount-code order))))))
-                 (setf (slot-value order 'splice/harness::amount-minor-units) cents
-                       (splice/harness:order-status order) :discounted)
-                 (splice/harness::write-through-float order cents)
+               (h::maybe-inject :discount order 0.5)
+               (let ((cents (round (* (slot-value order 'h::amount-minor-units)
+                                      (h::discount-multiplier
+                                       (h:order-discount-code order))))))
+                 (setf (slot-value order 'h::amount-minor-units) cents
+                       (h:order-status order) :discounted)
+                 (h::write-through-float order cents)
                  cents)))
             (total-invoice
              (lambda (order)
-               (splice/harness::maybe-inject :invoice order 0.5)
-               (let ((cents (slot-value order 'splice/harness::amount-minor-units)))
-                 (setf (splice/harness:order-status order) :invoiced)
-                 (splice/harness::write-through-float order cents)
+               (h::maybe-inject :invoice order 0.5)
+               (let ((cents (slot-value order 'h::amount-minor-units)))
+                 (setf (h:order-status order) :invoiced)
+                 (h::write-through-float order cents)
                  cents))))))
     (list :name 'currency-migration-cluster
           :functions functions
@@ -96,19 +96,19 @@ forms so members can refuse a mismatch."
         (list (splice::make-class-patch
                :class-name (intern (symbol-name (getf c :name)) :splice/harness)
                :add-slots (sublis '((amount-minor-units
-                                     . splice/harness::amount-minor-units))
+                                     . h::amount-minor-units))
                                   (getf c :add-slots))
-               :drop-slots (list 'splice/harness::float-total)
-               :migrate-forward #'splice/harness::forward-migration
-               :migrate-backward #'splice/harness::backward-migration)))
+               :drop-slots (list 'h::float-total)
+               :migrate-forward #'h::forward-migration
+               :migrate-backward #'h::backward-migration)))
       :contracts
       (list (splice::make-contract
              :name 'cluster-invoice-exact
              :check-fn (lambda ()
-                         (let ((o (splice/harness:make-test-order :cents 1099))
-                               (splice/harness:*fault* nil))
-                           (funcall (splice:new 'splice/harness::price-order) o)
-                           (= 1099 (funcall (splice:new 'splice/harness::total-invoice) o))))
+                         (let ((o (h:make-test-order :cents 1099))
+                               (h:*fault* nil))
+                           (funcall (splice:new 'h::price-order) o)
+                           (= 1099 (funcall (splice:new 'h::total-invoice) o))))
              :source '(cluster-invoice-exact)))))))
 
 ;;; ---------------------------------------------------------------------
@@ -132,12 +132,12 @@ Drives its own synthetic workload once committed."
           (ecase (first msg)
             (:prepare
              (destructuring-bind (&key spec fault) (rest msg)
-               (splice/harness:reset-workload)
-               (setf splice/harness:*fault*
-                     (when fault (splice/harness:make-fault :kind fault)))
+               (h:reset-workload)
+               (setf h:*fault*
+                     (when fault (h:make-fault :kind fault)))
                ;; orders that must survive forward migration and restore on rollback
-               (setf orders (splice/harness:make-pre-existing-orders
-                             (splice/harness:make-rng port) 20))
+               (setf orders (h:make-pre-existing-orders
+                             (h:make-rng port) 20))
                (handler-case
                    (progn (setf ps (build-patch-set-from-spec spec))
                           (send-form stream (list :prepared :name (splice:patch-set-name ps))))
@@ -170,7 +170,7 @@ Drives its own synthetic workload once committed."
                                 :state (splice:patch-set-state ps)
                                 :chain-ok ok
                                 :entries entry-count
-                                :mixed (splice/harness:coherence-violations)
+                                :mixed (h:coherence-violations)
                                 :reconstruction-ok
                                 (and (splice:verify-reconstruction log-path) t)
                                 :reversal (splice::patch-set-last-reversal-report ps)))))
@@ -184,7 +184,7 @@ Drives its own synthetic workload once committed."
 the conductor every 200 tasks."
   (sb-thread:make-thread
    (lambda ()
-     (let ((rng (splice/harness:make-rng (+ 1000 port))))
+     (let ((rng (h:make-rng (+ 1000 port))))
        (loop for i from 1
              until (or (car stop)
                        (member (splice:patch-set-state ps)
@@ -192,15 +192,15 @@ the conductor every 200 tasks."
                                  :promoting :swapping :rolling-back :restoring))
                        (> i 50000))
              do (splice:with-task (:id i :swallow-errors t)
-                  (splice/harness:process-order
+                  (h:process-order
                    (if (zerop (mod i 11))
-                       (nth (mod (splice/harness:rng-next rng) (length orders))
+                       (nth (mod (h:rng-next rng) (length orders))
                             orders)
-                       (make-instance 'splice/harness:order
+                       (make-instance 'h:order
                                       :id i
-                                      :item-count (splice/harness:rng-range rng 1 9)
-                                      :unit-price (/ (splice/harness:rng-range rng 100 9999) 100.0)
-                                      :discount-code (case (mod (splice/harness:rng-next rng) 5)
+                                      :item-count (h:rng-range rng 1 9)
+                                      :unit-price (/ (h:rng-range rng 100 9999) 100.0)
+                                      :discount-code (case (mod (h:rng-next rng) 5)
                                                        (0 "TEN") (1 "VIP") (t nil))))))
                 (when (zerop (mod i 200))
                   (let ((sprt (splice::patch-set-sprt-error ps)))

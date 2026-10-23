@@ -1,8 +1,5 @@
 .DS_Store
 
-# working notes and drafts; see docs/private-notes/README.md
-docs/private-notes/
-
-# generated html, rendered from the markdown by notes-html --mirror
-docs/html/
-docs/
+# the notes tree is private except reference/, which is committed
+docs/*
+!docs/reference/
