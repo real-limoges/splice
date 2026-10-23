@@ -1,12 +1,10 @@
 ;;;; splice.asd: definition file (SBCL only)
 
-(defsystem "splice"
-  :description "Safety net for hot-patching a running SBCL image: coherent
-patch sets, SPRT-gated canary rollout, reversible class migration, and a
-hash-chained log."
+(defsystem "splice/core"
+  :description "The splice library. The coherent patch sets, the SPRT-gated canary rollout,
+the reversible class migration, and the hash-chained log. Very specifically loads no SBCL contribs."
   :author "splice project"
   :license "MIT"
-  :depends-on ("sb-introspect" "sb-bsd-sockets")
   :serial t
   :components ((:module "src"
                 :components ((:file "package")
@@ -18,15 +16,28 @@ hash-chained log."
                              (:file "router")
                              (:file "migration")
                              (:file "patch")
-                             (:file "lifecycle")
+                             (:file "lifecycle")))))
+
+(defsystem "splice"
+  :description "Safety net for hot-patching a running SBCL image: coherent
+patch sets, SPRT-gated canary rollout, reversible class migration, and a
+hash-chained log. The umbrella is splice/core, the synthetic workload, and
+the cluster prototype."
+  :author "splice project"
+  :license "MIT"
+  :depends-on ("splice/core" "sb-bsd-sockets")
+  :serial t
+  :components ((:module "src"
+                :components ((:file "harness-package")
                              (:file "harness")
+                             (:file "cluster-package")
                              (:file "cluster"))))
   :in-order-to ((test-op (test-op "splice/tests"))))
 
 (defsystem "splice/tests"
   :description "Unit tests. Fast enough to run on every change; the criteria
 run is (asdf:test-system \"splice/criteria\")."
-  :depends-on ("splice" "fiveam")
+  :depends-on ("splice" "fiveam" "sb-introspect")
   :serial t
   :components ((:module "test/unit"
                 :components ((:file "package")

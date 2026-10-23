@@ -86,6 +86,12 @@ call cost from ~2x to ~1.5x.")
 
 ;;; Static checks that run at registration, veto early
 
+(defun lambda-list-of (fuction)
+  "FUNCTION's lambda list. A generic function answers with declared lambda list."
+  (if (typep function 'generic-function)
+      (sb-mop:generic-function-lambda-list function)
+      (sb-kernel:%fun-lambda-list function)))
+
 (defun parse-arity (lambda-list)
   "(values min-args max-args-or-nil). NIL max means &rest/&key.
 This is such a cool use of code as data."
@@ -103,9 +109,9 @@ This is such a cool use of code as data."
 (defun check-arity-compatibility (ps fp)
   "New implementation must accept every call shape the old one accepted."
   (multiple-value-bind (old-min old-max)
-      (parse-arity (sb-introspect:function-lambda-list (fn-patch-old-fn fp)))
+      (parse-arity (lambda-list-of (fn-patch-old fp)))
     (multiple-value-bind (new-min new-max)
-        (parse-arity (sb-introspect:function-lambda-list (fn-patch-new-fn fp)))
+        (parse-arity (lambda-list-of (fn-patch-new fp)))
       (when (or (> new-min old-min)
                 (and new-max (or (null old-max) (< new-max old-max))))
         (veto ps :static-arity
@@ -364,7 +370,7 @@ call goes through &REST and APPLY, so it is slower than a fixed-arity shim."
   (let ((old (fn-patch-old-fn fp))
         (new (fn-patch-new-fn fp)))
     (multiple-value-bind (min max)
-        (parse-arity (sb-introspect:function-lambda-list old))
+        (parse-arity (lambda-list-of old))
       (if (and max (= min max))
           (funcall (shim-factory min) ps old new)
           (variadic-shim ps old new)))))
