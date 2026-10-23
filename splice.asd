@@ -53,3 +53,12 @@ artifacts/criteria-report.md with the measured numbers."
                     (declare (ignore o c))
                     (unless (uiop:symbol-call :splice-criteria :run-criteria)
                       (error "splice criteria failed; see artifacts/criteria-report.md"))))
+
+(defsystem "splice/demo"
+  :description "The live-image demo: snapshots, the sampler, renderers, the
+presenter gate, recording and the act driver. Everything testable without a browser."
+  :depends-on ("splice")
+  :serial t
+  :components ((:module "src/demo"
+                :components ((:file "package")
+                             (:file "record")))))

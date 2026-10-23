@@ -5,6 +5,10 @@
 (defvar *contract-context* nil
   "Bound to the patch set while its contracts run, so SPLICE:NEW resolves.")
 
+(defvar *shim-factories* (make-hash-table :test #'eql)
+  "Shim factories compiled once per arity. Skipping &REST/APPLY cuts canary
+call cost from ~2x to ~1.5x.")
+
 (defun new (name)
   "Inside a contract check: the patch set's new implementation of NAME."
   (let ((fp (find name (patch-set-fn-patches *contract-context*)
@@ -323,10 +327,6 @@ when PS has paired fallback."
       (call-new-noting-anomalies ps run-new)))
 
 ;;; Function shims
-
-(defvar *shim-factories* (make-hash-table :test #'eql)
-  "Shim factories compiled once per arity. Skipping &REST/APPLY cuts canary
-call cost from ~2x to ~1.5x.")
 
 (defun fixed-arity-factory-form (arity)
   "Source of a factory (ps old new) -> shim taking exactly ARITY arguments.

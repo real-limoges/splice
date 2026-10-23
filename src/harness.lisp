@@ -13,9 +13,32 @@
 (in-package #:splice/harness)
 
 ;;; ---------------------------------------------------------------------
-;;; Deterministic 64-bit LCG, so every session is reproducible from its seed.
+;;; Globals and the structs they hold
 
 (defstruct (rng (:constructor %make-rng)) (state 88172645463325252))
+
+(defstruct fault
+  kind
+  (latent-code "VIP")           ; :latent trips on this discount code
+  (share-threshold 0.15)        ; :load-correlated trips above this share
+  (window-min-total 100)        ; ... once the window has enough traffic
+  (onset-calls 250)             ; :delayed-onset healthy for this many calls
+  (onset-error-rate 0.30)
+  (slow-ms 3.0)                 ; :slow-burn extra latency
+  (call-count (list 0))         ; shared counter (cons cell for atomicity)
+  (window (list 0 0 0)))        ; (start-tick total-calls canary-calls)
+
+(defvar *fault* nil "The active injected fault, or NIL for a clean patch.")
+
+(defvar *fault-rng* nil "RNG serving MAYBE-INJECT draws, seeded per session.")
+
+;; pristine references for RESET-WORKLOAD. *PRISTINE-FNS* is bound further
+;; down, once the original implementations it captures exist.
+(defvar *pristine-fns*)
+(defvar *pristine-order-shape* nil)
+
+;;; ---------------------------------------------------------------------
+;;; Deterministic 64-bit LCG, so every session is reproducible from its seed.
 
 (defun make-rng (seed) (%make-rng :state (logand (+ seed 2862933555777941757)
                                                  #xffffffffffffffff)))
@@ -87,27 +110,14 @@ joining the set."
     (with-output-to-string (s) (print-total order s))
     total))
 
-;; pristine references for RESET-WORKLOAD
+;; bind the *PRISTINE-FNS* declared at the top, now that the originals exist.
+;; DEFVAR binds only on first load, so a reload never captures patched code.
 (defvar *pristine-fns*
   (list 'price-order #'price-order 'apply-discount #'apply-discount
         'total-invoice #'total-invoice 'process-order #'process-order))
-(defvar *pristine-order-shape* nil)
 
 ;;; ---------------------------------------------------------------------
 ;;; Fault injection
-
-(defstruct fault
-  kind
-  (latent-code "VIP")           ; :latent trips on this discount code
-  (share-threshold 0.15)        ; :load-correlated trips above this share
-  (window-min-total 100)        ; ... once the window has enough traffic
-  (onset-calls 250)             ; :delayed-onset healthy for this many calls
-  (onset-error-rate 0.30)
-  (slow-ms 3.0)                 ; :slow-burn extra latency
-  (call-count (list 0))         ; shared counter (cons cell for atomicity)
-  (window (list 0 0 0)))        ; (start-tick total-calls canary-calls)
-
-(defvar *fault* nil "The active injected fault, or NIL for a clean patch.")
 
 (defun all-fault-kinds () '(:latent :load-correlated :slow-burn
                             :delayed-onset :migration))
@@ -170,8 +180,6 @@ tolerable; the window is statistical."
 ;;; ---------------------------------------------------------------------
 ;;; Flagship patch set: float dollars -> rational minor units. New code
 ;;; writes through to FLOAT-TOTAL so old code stays correct during canary.
-
-(defvar *fault-rng* nil "RNG serving MAYBE-INJECT draws, seeded per session.")
 
 (defun write-through-float (order cents)
   "Keep FLOAT-TOTAL in sync while it exists (the canary union shape)."

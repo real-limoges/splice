@@ -16,6 +16,8 @@
   (:export #:run-criteria))
 (in-package :splice-criteria)
 
+(defstruct batch kind runs (caught 0) final-states stages detect-ns detect-tasks)
+
 (defvar *runs* 100 "Sessions per fault class; bound by RUN-CRITERIA.")
 (defvar *failures* '())
 (defvar *report* '())
@@ -230,8 +232,6 @@ migrated forward mid-canary, then restored)"
 
 ;;; ---------------------------------------------------------------------
 ;;; C2/C6: fault matrix + statistical honesty over *runs* sessions/class
-
-(defstruct batch kind runs (caught 0) final-states stages detect-ns detect-tasks)
 
 (defun batch-count (state b)
   (count state (batch-final-states b)))

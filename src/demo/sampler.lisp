@@ -1,3 +1,7 @@
+(defparameter *lane-prefixes*
+  '("harness-worker-" "harness-straggler" "demo-session"
+    "splice-promote-" "splice-rollback-"))
+
 (defun layout-pending-p (instance)
   "True while INSTANCE is waiting for a class update. Reads the layout not slots."
   (not (null (sb-kernel:layout-invalid (sb-kernel:layout-of instance)))))
@@ -39,10 +43,6 @@
   (cond ((layout-pending-p order) :pending)
         (journaled-p :migrated)
         (t :current)))
-
-(defparameter *lane-prefixes*
-  '("harness-worker-" "harness-straggler" "demo-session"
-    "splice-promote-" "splice-rollback-"))
 
 (defun thread-pins (thread)
   "THREAD's current pins as (set-name . route) or () between tasks"

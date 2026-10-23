@@ -3,6 +3,18 @@
 
 (in-package #:splice/demo)
 
+(defstruct (play-position (:constructor make-position (&key hold)))
+  (lock (sb-thread:make-mutex :name "demo-player-position"))
+  (index 0)
+  (jump nil)
+  (paused nil)
+  (hold nil))
+
+(defstruct player thread position (running t))
+
+(defvar *player* nil
+  "Replay player: its thread, position, and stop flag. NIL before first replay")
+
 (defun make-recorder (path header)
   "Open PATH and write the HEADER. Returns two values;
     - A sink that appends snapshots
@@ -29,9 +41,9 @@ recordings/act-2-seed-2002-20261028T170211.sexp in placed in the splice tree."
   "Short commit from splice's checkout with -dirty if necessary or \"unknown\""
   (handler-case
       (string-trim `(#\Newline #\Space)
-                   (uiop:run-program (list "git" "-C" (namestring asdf:system-source-directory "splice"))
-                                     "describe" "--always" "--dirty" "--abbrev=7")
-                   :output :string))
+                   (uiop:run-program (list "git" "-C" (namestring (asdf:system-source-directory "splice"))
+                                           "describe" "--always" "--dirty" "--abbrev=7")
+                                     :output :string)))
   (error () "unknown"))
 
 ;;; TODO - Rework this. I really hate a lot of this
@@ -39,7 +51,7 @@ recordings/act-2-seed-2002-20261028T170211.sexp in placed in the splice tree."
   "First line of recording of ACT run with SETTINGS.
 It's a plist of :seed :fault :threads :pre-existing"
   (list :recording 1
-        :snapshot-version +snapshot-verion+
+        :snapshot-version +snapshot-version+
         :splice-commit (splice-commit)
         :started (splice::timestamp-string)
         :act act
@@ -67,19 +79,12 @@ It's a plist of :seed :fault :threads :pre-existing"
   "True when FORM (a header or snapshot) is at this image's snapshot version."
   (eql +snapshot-version+ (or (getf form :snapshot-version) (getf form :version))))
 
-(defstruct (play-position (:constructor make-position (&key hold)))
-  (lock (sb-thread:make-mutex :name "demo-player-position"))
-  (index 0)
-  (jump nil)
-  (paused nil)
-  (hold nil))
-
 (defun next-step (position count)
   "What the player does next - (:play i), (:jump i), :paused or :done"
   (sb-thread:with-mutex ((play-position-lock position))
     (let ((step (step-for position count)))
       (when (consp step)
-        (setf (lay-position-index position) (1+ (second step))
+        (setf (play-position-index position) (1+ (second step))
               (play-position-jump position) nil))
       step)))
 
@@ -109,3 +114,81 @@ It's a plist of :seed :fault :threads :pre-existing"
         (when (eq kind :jump) (funcall on-jump))
         (funcall sink (aref snapshots index) index)
         (sleep (frame-delay snapshots index speed)))))
+
+(defun replay-recording (snapshots sink &key (speed 1) (position (make-position))
+                                          (on-jump (constantly :ignore))
+                                          (running (constantly t)))
+  "Feed SNAPSHOTS to SINK. Honors POSITION's jumps and pauses/calls ON-JUMP before jumping-to frames.
+   Returns :finished or :stopped"
+  (loop
+    (unless (funcall running) (return :stopped))
+    (let ((step (next-step position (length snapshots))))
+      (when (eq step :done) (return :finished))
+      (play-step step snapshots sink speed on-jump))))
+
+(defun mark-replay (snapshot header index count faults)
+  "SNAPSHOT with :replay plist for the replay row, and the player's FAULTS in
+of any it was recorded with. Never recorded."
+  (list* :replay (list :started (getf header :started) :index index :frames count)
+         :faults (append faults (getf snapshot :faults))
+         snapshot))
+
+(defun player-alive-p ()
+  (and *player* (sb-thread:thread-alive-p (player-thread *player*))))
+
+(defun start-player (header snapshots sink &key (reset (constantly :ignored)) (speed 1))
+  "Play SNAPSHOTS into SINK. RESET is called after ever jump.
+Returns :started or :already-running"
+  (if (player-alive-p)
+      :already-running
+      (let ((player (make-player :position (make-position :hold t))))
+        (setf (player-thread player)
+              (sb-thread:make-thread (lambda () (run-player player header snapshots sink reset speed))
+                                     :name "demo-player"))
+        (setf *player* player)
+        :started)))
+
+(defun run-player (player header snapshots sink reset speed)
+  (let ((faults '()))
+    (replay-recording snapshots
+                      (lambda (snapshot index)
+                        (setf faults (call-player-sink
+                                      sink (mark-replay snapshot header index (length snapshots) faults))))
+                      :speed speed
+                      :position (player-position player)
+                      :on-jump reset
+                      :running (lambda () (player-running player)))))
+
+(defun call-player-sink (sink frame)
+  "Call SINK on FRAME. Returns faults for next frame: () or a list holding the error string"
+  (handler-case (progn (funcall sink frame) '())
+    (error (e) (list (fault-string "replay sink failed" e)))))
+
+(defun stop-player ()
+  "Stop player + wait for thread to exit.
+Returns :stopped or :not-running"
+  (if (player-alive-p)
+      (progn  (setf (player-running *player*) nil)
+              (sb-thread:join-thread (player-thread *player*) :default :aborted)
+              :stopped)
+      :not-running))
+
+(defun jump-player (index)
+  "Ask player to show frame INDEX.
+Returns :jumping, :ignored, or :no-player"
+  (cond ((not (player-alive-p)) :no-player)
+        ((not (integerp index)) :ignored)
+        (t (let ((position (player-position *player*)))
+             (sb-thread:with-mutex ((play-position-lock position))
+               (setf (play-position-jump position) index)))
+           :jumping)))
+
+(defun pause-player (paused)
+  "Hold when PAUSED is true, play when false.
+Returns :paused, :playing, or :no-player"
+  (if (player-alive-p)
+      (let ((position (player-position *player*)))
+        (sb-thread:with-mutex ((play-position-lock position))
+          (setf (play-position-paused position) paused))
+        (if paused :paused :playing))
+      :no-player))
