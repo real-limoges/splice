@@ -483,3 +483,63 @@ Returns MESSAGE's kind"
                       (list :prepared :name (symbol-name (splice:patch-set-name ps)))))
     (error (e)
       (member-reply cluster-member (list :veto :reason (princ-to-string e))))))
+
+(defun member-commit (cluster-member)
+  (let ((ps (member-patch-set cluster-member)))
+    (handler-case
+        (progn
+          (splice:install ps)
+          (member-reply cluster-member '(:committed))
+          (start-terminal-watch cluster-member ps)
+          (member-committed (member-adapter cluster-member) cluster-member ps))
+      (splice:patch-vetoed (e)
+        (member-reply cluster-member (list :veto :reason (princ-to-string e)))))))
+
+(defun start-terminal-watch (cluster-member ps)
+  "Thread that tells conductor once PS reaches a terminal state or what state it
+is in after 2 minutes"
+  (sb-thread:make-thread
+   (lambda ()
+     (splice:wait-for-state ps '(:promoted :rolled-back :frozen) :timeout 120)
+     (member-reply cluster-member (list :terminal :state (splice:patch-set-state ps))))
+   :name (format nil "splice-member-watch-~a" (splice:patch-set-name ps))))
+
+(defun member-rollback (cluster-member)
+  "Roll set back if it is still 'canary-ing', otherwise answer :CONTINUE since3
+the conductor gates only rollback"
+  (let ((ps (member-patch-set cluster-member)))
+    (member-reply cluster-member
+                  (list :rollback-result
+                        :outcome
+                        (if (null ps)
+                            :continue
+                            (splice::with-set-lock (ps)
+                              (if (splice::canary-stage-p (splice:patch-set-state ps))
+                                  (splice::initiate-rollback-locked
+                                   ps '(:conductor-command))
+                                  :continue)))))))
+
+(defun member-report (cluster-member)
+  "Wait for a terminal state and send :FINAL with the adapter's extra fields"
+  (let ((ps (member-patch-set cluster-member)))
+    (splice:wait-for-state ps '(:promoted :rolled-back :frozen :vetoed) :timeout 30)
+    (let ((extra (final-report-fields (member-adapter cluster-member) ps)))
+      (member-reply cluster-member
+                    (list* :final
+                           :state (spice:patch-set-state ps)
+                           :reversal (splice::patch-set-last-reversal-report ps)
+                           extra)))))
+
+(defun health-message (ps)
+  "PS's error SPRT as a :HEALTH message, with the LLR in thousandths"
+  (let ((sprt (splice::patch-set-sprt-error ps)))
+    (list :health
+          :state (splice:patch-set-state ps)
+          :fraction (splice::patch-set-current-fraction ps)
+          :n (splice:sprt-n sprt)
+          :llr-milli (round (* 1000 (splice:sprt-llr sprt))))))
+
+(defun member-send-health (cluster-member)
+  "Send the conductor the member's current SPRT health. The host's workload
+can call it as much as it wants"
+  (member-reply cluster-member (health-message (member-patch-set cluster-member))))

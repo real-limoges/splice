@@ -1,3 +1,5 @@
+(in-package #:splice/demo)
+
 (defparameter *lane-prefixes*
   '("harness-worker-" "harness-straggler" "demo-session"
     "splice-promote-" "splice-rollback-"))
