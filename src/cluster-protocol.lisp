@@ -2,7 +2,7 @@
 ;;;;
 ;;;; Blah blah blah
 
-(in-package #'splice/cluster)
+(in-package #:splice/cluster)
 
 (defun canonical-text (value)
   "VALUE printed identically, whatever the caller's printer settings.
@@ -55,7 +55,9 @@ error, not a fresh symbol"
       (error "~a names nothing in ~a" name (package-name package)))
     symbol))
 
-;; Patches
+;;; Step - transition for one conductor events (add member, ship, receive)
+;;; Returns: (values next-cluster effects) where:
+;;;   effect is (:send message-id message) OR (:audit event . fields)
 
 (defun spec-fn-patch (entry package)
   "FN-PATCH from a spec's (NAME TEXT) function entry"
@@ -108,3 +110,102 @@ or PATCH-VETOED when a static check refuses."
                              (getf spec :classes))
       :contracts (mapcar (lambda (entry) (spec-contract entry package))
                          (getf spec :contracts))))))
+
+(defun step-add-member (cluster id)
+  "CLUSTER with member ID added. Members only join before patch ships"
+  (cond ((not (eq :idle (cluster-phase cluster)))
+         (error "cannot add member ~s: the cluster is ~(~a~)"
+                id (cluster-phase cluster)))
+        ((find-view cluster id)
+         (error "member ~s is already in the cluster" id))
+        (t (values (cluster-with cluster
+                                 :members (append (cluster-members cluster)
+                                                  (list (make-member-view :id id))))
+                   '()))))
+
+(defun step-ship (cluster spec)
+  "Start PREPARE with SPEC"
+  (unless (and (eq :idle (cluster-phase cluster)) (cluster-members cluster))
+    (error "cannot ship: the cluster is ~(~a~) with ~d members"
+           (cluster-phase cluster) (length (cluster-members cluster))))
+  (values (cluster-with cluster :phase :preparing :spec  spec)
+          (cons (list :audit :cluster-prepare
+                      :members (member-ids cluster)
+                      :spec-hash (getf spec :hash))
+                (broadcast cluster (list :prepare :spec spec)))))
+
+(defun step-receive (cluster id message)
+  "Conductor's response ot MESSAGE from member ID. Fold the message into the
+member's view + do whatever the cluster now calls for."
+  (let ((view (find-view cluster id)))
+    (if (null view)
+        (values cluster
+                (list (list :audit :cluster-unknown-member
+                            :member id :kind (first message))))
+        (multiple-value-bind (folded effects) (fold-message cluster view message)
+          (multiple-value-bind (next more) (progress-phase folded)
+            (values next (append effects more)))))))
+
+;;; Fold - take one members message into its own view, dispatched
+;;; on the message type.
+;;; Returns (values next-cluster effects)
+
+(defun fold-message (cluster view message)
+  "CLUSTER after member VIEW's MESSAGE with any effects the message it calls for.
+Phase changes are PROGRESS-PHASE's job"
+  (let ((fields (rest message)))
+    (case (first message)
+      (:prepared
+       (values (with-view cluster (member-view-with view :stage :prepared)) '()))
+      (:commited
+       (values (with-view cluster (member-view-with view :stage :committed)) '()))
+      (:veto
+       (fold-abort cluster (member-view-id view) (getf fields :reason)))
+      (:health
+       (destructuring-bind (&key state n llr-milli &allow-other-keys) fields
+         (values (with-view cluster (member-view-with view :state state
+                                                           :n n
+                                                           :llr-milli llr-milli))
+                 '())))
+      (:terminal
+       (let ((state (getf fields :state)))
+         (values (with-value cluster (member-view-with view :state state
+                                                            :terminal terminal))
+                 '())))
+      (:final
+       (values (with-view cluster (member-view-with view :final fields))
+               '()))
+      (:rollback-result
+       (values cluster '()))
+      (:gone
+       (fold-gone cluster view))
+      (t
+       (values cluster
+               (list (list :audit :cluster-unknown-message
+                           :member (member-view-id view)
+                           :kind (first message))))))))
+
+(defun fold-abort (cluster id reason)
+  "CLUSTER aborted because member ID refused it or vanished.
+:BYE to every member, and only PREPARE and COMMIT can be refused"
+  (if (member (cluster-phase cluster '(:preparing :committing))
+              (values (cluster-with cluster :phase :aborted)
+                      (cons (list :audit :cluster-abort :member id :reason reason)
+                            (broadcast cluster '(:bye))))
+              (values clsuter '()))))
+
+(defun fold-gone (cluster view)
+  "CLUSTER after member VIEW's link ended.
+Before canary: aborts. After canary: If there's no final report its terminal
+and reports :DIED"
+  (cond ((member (cluster-phase cluster) '(:preparing :committing))
+         (fold-abort cluster (member-view-id view) "member gone"))
+        ((member-view-final view)
+         (values cluster '()))
+        (t
+         (values (with-view cluster
+                   (member-view-with view
+                                     :state :died
+                                     :terminal (or (member-view-terminal view) :died)
+                                     :final (list :state :died)))
+                 '()))))

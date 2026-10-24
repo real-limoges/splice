@@ -82,13 +82,13 @@ It's a plist of :seed :fault :threads :pre-existing"
 (defun next-step (position count)
   "What the player does next - (:play i), (:jump i), :paused or :done"
   (sb-thread:with-mutex ((play-position-lock position))
-    (let ((step (step-for position count)))
+    (let ((step (command-for position count)))
       (when (consp step)
         (setf (play-position-index position) (1+ (second step))
               (play-position-jump position) nil))
       step)))
 
-(defun step-for (position count)
+(defun command-for (position count)
   (let ((jump (play-position-jump position))
         (index (play-position-index position)))
     (cond (jump (list :jump (max 0 (min jump (1- count)))))
