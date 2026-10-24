@@ -111,8 +111,108 @@ or PATCH-VETOED when a static check refuses."
       :contracts (mapcar (lambda (entry) (spec-contract entry package))
                          (getf spec :contracts))))))
 
+;;; Conductor's view of the cluster as a value.
+
+(defstruct (member-view (:copier nil))
+  (id nil         :read-only t)
+  (stage :added   :read-only t)
+  (state :unknown :read-only t)
+  (llr-milli 0    :read-only t)
+  (n 0            :read-only t)
+  (terminal nil   :read-only t)
+  (final nil      :read-only t))
+
+(defun member-view-with (view &key (stage (member-view-stage view))
+                                (state (member-view-state view))
+                                (llr-milli (member-view-llr-milli view))
+                                (n (member-view-n view))
+                                (terminal (member-view-terminal view))
+                                (final (member-view-final view)))
+  "Copy of VIEW with the named fields replaced"
+  (make-member-view :id (member-view-id view)
+                    :stage stage
+                    :state state
+                    :llr-milli llr-milli
+                    :n n
+                    :terminal terminal
+                    :final final))
+
+
+
+(defstruct (cluster (:copier nil))
+  (phase :idle :read-only t)
+  (members '() :read-only t)
+  (spec nil :read-only t)
+  (upper-milli 0 :read-only t)
+  (rollback-sent nil :read-only t))
+
+(defun cluster-with (cluster &key (phase (cluster-phase cluster))
+                               (members (cluster-members cluster))
+                               (spec (cluster-spec cluster))
+                               (rollback-sent (cluster-rollback-sent cluster)))
+  "Copy of CLUSTER with the named fields replaced"
+  (make-cluster :phase phase
+                :members members
+                :spec spec
+                :upper-milli (cluster-upper-milli cluster)
+                :rollback-sent rollback-sent))
+
+(defun empty-cluster (alpha beta)
+  "Cluster wiht no members, whose pooled SPRT rejects at Wald's upper
+for ALPHA and BETA (as each member's SPRT does)"
+  (make-cluster :upper-milli (round (* 1000 (log (/ (- 1d0 beta) alpha))))))
+
+;;; Reading and Rebuilding the Value
+
+(defun find-view (cluster id)
+  (find id (cluster-members cluster) :key #'member-view-id :test #'equal))
+
+
+(defun with-view (cluster view)
+  "CLUSTER with the member view that has VIEW's ids replaced by VIEW"
+  (cluster-with cluster
+                :members (mapcar (lambda (old)
+                                   (if (equal (member-view-id old)
+                                              (member-view-id view))
+                                       view
+                                       old))
+                                 (cluster-members cluster))))
+
+(defun member-ids (cluster)
+  (mapcar #'member-view-id (cluster-members cluster)))
+
+(defun broadcast (cluster message)
+  "Send effect to every member in the order they were added"
+  (mapcar (lambda (id) (list :send id message)) (member-ids cluster)))
+
+(defun all-members-p (cluster predicate)
+  (every predicate (cluster-members cluster)))
+
+(defun cluster-finals (cluster)
+  "Each Member's final report, headed :MEMBER in order"
+  (mapcar (lambda (view)
+            (list* :member (member-view-id view) (member-view-final view)))
+          (cluster-members cluster)))
+
+(defun pooled-llr-milli (cluster)
+  "Members' latest LLRs summed. Independent add"
+  (reduce #'+ (cluster-members cluster) :key #'member-view-llr-milli))
+
+(defun rollback-trigger (cluster)
+  "Why the cluster should roll back right now or NIL"
+  (cond ((some (lambda (view)
+                 (or (eq :rolled-back (member-view-terminal view))
+                     (member (member-view-state view) '(:rolling-back :restoring))))
+               (cluster-members cluster))
+         :member-local-reject)
+        ((>= (pooled-llr-milli cluster) (cluster-upper-milli cluster))
+         :pooled-sprt-reject)
+        (t nil)))
+
+;;; Step
+
 (defun step-add-member (cluster id)
-  "CLUSTER with member ID added. Members only join before patch ships"
+  "CLUSTER with member ID added. Members join only before patch ships"
   (cond ((not (eq :idle (cluster-phase cluster)))
          (error "cannot add member ~s: the cluster is ~(~a~)"
                 id (cluster-phase cluster)))
@@ -157,7 +257,7 @@ Phase changes are PROGRESS-PHASE's job"
     (case (first message)
       (:prepared
        (values (with-view cluster (member-view-with view :stage :prepared)) '()))
-      (:commited
+      (:committed
        (values (with-view cluster (member-view-with view :stage :committed)) '()))
       (:veto
        (fold-abort cluster (member-view-id view) (getf fields :reason)))
@@ -169,8 +269,8 @@ Phase changes are PROGRESS-PHASE's job"
                  '())))
       (:terminal
        (let ((state (getf fields :state)))
-         (values (with-value cluster (member-view-with view :state state
-                                                            :terminal terminal))
+         (values (with-view cluster (member-view-with view :state state
+                                                           :terminal state))
                  '())))
       (:final
        (values (with-view cluster (member-view-with view :final fields))
@@ -188,11 +288,11 @@ Phase changes are PROGRESS-PHASE's job"
 (defun fold-abort (cluster id reason)
   "CLUSTER aborted because member ID refused it or vanished.
 :BYE to every member, and only PREPARE and COMMIT can be refused"
-  (if (member (cluster-phase cluster '(:preparing :committing))
-              (values (cluster-with cluster :phase :aborted)
-                      (cons (list :audit :cluster-abort :member id :reason reason)
-                            (broadcast cluster '(:bye))))
-              (values clsuter '()))))
+  (if (member (cluster-phase cluster) '(:preparing :committing))
+      (values (cluster-with cluster :phase :aborted)
+              (cons (list :audit :cluster-abort :member id :reason reason)
+                    (broadcast cluster '(:bye))))
+      (values cluster '())))
 
 (defun fold-gone (cluster view)
   "CLUSTER after member VIEW's link ended.
@@ -209,3 +309,177 @@ and reports :DIED"
                                      :terminal (or (member-view-terminal view) :died)
                                      :final (list :state :died)))
                  '()))))
+
+;;; Progress: What the cluster calls for and dispatched on the phase.
+;;; Returrns: (values next-cluster effects)
+
+(defun progress-phase (cluster)
+  "Whatever the folded CLUSTER calls for"
+  (case (cluster-phase cluster)
+    (:preparing
+     (if (all-members-p cluster (lambda (view) (eq :prepared (member-view-stage view))))
+         (values (cluster-with cluster :phase :committing)
+                 (broadcast cluster '(:commit)))
+         (values cluster '())))
+    (:committing
+     (if (all-members-p cluster (lambda (view) (eq :committed (member-view-stage view))))
+         (multiple-value-bind (running effects)
+             (progress-running (cluster-with cluster :phase :running))
+           (values running
+                   (cons (list :audit :cluster-commit :members (member-ids cluster))
+                         effects)))
+         (values cluster '())))
+    (:running
+     (progress-running cluster))
+    (:reporting
+     (if (all-members-p cluster #'member-view-final)
+         (values (cluster-with cluster :phase :done)
+                 (cons (list :audit :cluster-final :reports (cluster-finals cluster))
+                       (broadcast cluster '(:bye))))
+         (values cluster '())))))
+
+(defun progress-running (cluster)
+  "Roll back (if called for) then report back when every member is terminal"
+  (multiple-value-bind (checked rollback) (progress-rollback cluster)
+    (if (all-members-p checked #'member-view-terminal)
+        (values (cluster-with checked :phase :reporting)
+                (append rollback (broadcast checked '(:report))))
+        (values checked rollback))))
+
+(defun progress-rollback (cluster)
+  "Broadcast :ROLLBACK on a member's local rollback or when the pooled
+LLR reaches the upper bound"
+  (let ((trigger (rollback-trigger cluster)))
+    (if (and trigger (not (cluster-rollback-sent cluster)))
+        (values (cluster-with cluster :rollback-sent t)
+                (cons (list :audit :cluster-rllback
+                            :pooled-llr (/ (pooled-llr-milli cluster) 1000.0)
+                            :upper (/ (cluster-upper-milli cluster) 1000.0)
+                            :trigger trigger)
+                      (broadcast cluster '(:rollback))))
+        (values cluster '()))))
+
+;;; Conductor's Adapter
+
+(defgeneric send-to-member (adapter member-id message)
+  (:documentation "Deliver MESSAGE to the member ADAPTER knows as MEMBER-ID.
+Conductor calls it while holding its lock, so method cannot call back
+into that conductor on the same thread"))
+
+;;; Conductor: Cluster value behidn a lock and the effects it calls for
+
+(defstruct (conductor (:constructor %make-conductor (adapter cluster)))
+  (adapter nil :read-only t)
+  (lock (sb-thread:make-mutex :name "splice conductor") :read-only t)
+  cluster)                              ; mutable
+
+(defun make-conductor (&key adapter (alpha 0.01d0) (beta 0.05d0))
+  "A conductor with no members. Every message goes through SEND-TO-MEMBER
+on ADAPTER. It goes in teh order it decided them and holds its lock"
+  (%make-conductor adapter (empty-cluster alpha beta)))
+
+(defun run-conductor-effect (conductor effect)
+  (ecase (first effect)
+    (:send (destructuring-bind (id message) (rest effect)
+             (send-to-member (conductor-adapter conductor) id message)))
+    (:audit (apply #'splice:audit (rest effect)))))
+
+(defun conductor-advance (conductor step)
+  "Apply STEP. Step is a function of the cluster and it returns
+(values next effects) under a lock. So it stores NEXT, runs the effects,
+and returns NEXT's phase"
+  (sb-thread:with-mutex ((conductor-lock conductor))
+    (multiple-value-bind (next effects) (funcall step (conductor-cluster conductor))
+      (setf (conductor-cluster conductor) next)
+      (dolist (effect effects)
+        (run-conductor-effect conductor effect))
+      (cluster-phase next))))
+
+(defun conductor-add-member (conductor member-id)
+  "Add MEMBER-ID before patch ships. Return the phase, :IDLE"
+  (conductor-advance conductor
+                     (lambda (cluster) (step-add-member cluster member-id))))
+
+(defun conductor-ship (conductor patch-set-forms)
+  "Start PREPARE. Send every member PATCH-SET-FORMS, a spec plist with hashes
+computed here. Return the phase, :PREPARING"
+  (let ((spec (spec-with-hash patch-set-forms)))
+    (conductor-advance conductor (lambda (cluster) (step-ship cluster spec)))))
+
+(defun conductor-receive (conductor member-id message)
+  "Hand CONDUCTOR one MESSAGE from MEMBER-ID as the transport received it.
+Safe to call from several threads! Returns the phase after it"
+  (conductor-advance conductor
+                     (lambda (cluster) (step-receive cluster member-id message))))
+
+(defun conductor-phase (conductor)
+  (cluster-phase (conductor-cluster conductor)))
+
+(defun conductor-finals (conductor)
+  "Each member's final report (:MEMBER id :STATE state ...) in the order added"
+  (cluster-finals (conductor-cluster conductor)))
+
+;;; Member's adapter
+
+(defgeneric send-to-conductor (adapter message)
+  (:documentation "Deliver MESSAGE from member to conductor. A member
+can call it from several threads at once, so the method must be safe to
+call like that"))
+
+(defgeneric member-committed (adapter cluster-member patch-set)
+  (:documentation "Called on the thread that delivered :COMMIT once the
+PATCH-SET is installed on CLUSTER-MEMBER. Adapter with a workload starts it
+and the workload calls MEMBER-SEND-HEALTH. Value is ignore"))
+
+(defmethod member-committed (adapter cluster-member patch-set)
+  "Adapter with no workload of its own"
+  (declare (ignore adapter cluster-member patch-set))
+  :no-workload)
+
+(defgeneric final-report-fields (adapter patch-set)
+  (:documentation "Extra fields for member's :FINAL report as a plist of wire values.
+Called once PATCH-SET is terminal. Adapter that closes its audit log here closes it after
+the set's last transition"))
+
+(defmethod final-report-fields (adapter patch-set)
+  "No extra fields"
+  (declare (ignore adapter patch-set))
+  '())
+
+;;; Members. Called CLUSTER-MEMBER because MEMBER is a COMMON-LISP symbol;
+;;; accessors are MEMBER-, like the rest of the member functions
+
+(defstruct (cluster-member (:conc-name member-)
+                           (:constructor %make-cluster-member (adapter)))
+  (adapter nil :read-only t)
+  ;; mutable
+  (patch-set nil))                      ; set exactly once by :prepare
+
+(defun make-member (&key adapter)
+  "Member with no patch set (yet) calling back into ADAPTER through
+SEND-TO-CONDUCTOR, MEMBER-COMMITTED, and FINAL-REPORT-FIELDS"
+  (%make-cluster-member adapter))
+
+(defun member-reply (cluster-member message)
+  (send-to-conductor (member-adapter cluster-member) message))
+
+(defun member-receive (cluster-member message)
+  "Act on MESSAGE from conductor and replying through SEND-TO-CONDUCTOR. Call
+it from one thread in arrival order. :REPORT may block for up to 30 seconds.
+Returns MESSAGE's kind"
+  (ecase (first message)
+    (:prepare (member-prepare cluster-member (getf (rest message) :spec)))
+    (:commit (member-commit cluster-member))
+    (:rollback (member-rollback cluster-member))
+    (:report (member-report cluster-member))
+    (:bye nil))
+  (first message))
+
+(defun member-prepare (cluster-member spec)
+  (handler-case
+      (let ((ps (build-patch-set spec)))
+        (setf (member-patch-set cluster-member) ps)
+        (member-reply cluster-member
+                      (list :prepared :name (symbol-name (splice:patch-set-name ps)))))
+    (error (e)
+      (member-reply cluster-member (list :veto :reason (princ-to-string e))))))
