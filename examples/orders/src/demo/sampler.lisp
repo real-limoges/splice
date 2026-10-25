@@ -1,8 +1,8 @@
-(in-package #:splice/demo)
+(in-package #:splice-orders/demo)
 
 (defparameter *lane-prefixes*
-  '("harness-worker-" "harness-straggler" "demo-session"
-    "splice-promote-" "splice-rollback-"))
+  (append orders:*thread-prefixes*
+          '("demo-session" "splice-promote-" "splice-rollback-")))
 
 (defun layout-pending-p (instance)
   "True while INSTANCE is waiting for a class update. Reads the layout not slots."
@@ -29,10 +29,10 @@
   "Which of the demo's three types CLASS-NAME has, just from the metadata"
   (let ((names (mapcar #'sb-mop:slot-definition-name
                        (sb-mop:class-slots (find-class class-name)))))
-    (cond ((and (member 'splice/harness::float-total names)
-                (member 'splice/harness::amount-minor-units names))
+    (cond ((and (member 'orders::float-total names)
+                (member 'orders::amount-minor-units names))
            :union)
-          ((member 'splice/harness::amount-minor-units names) :final)
+          ((member 'orders::amount-minor-units names) :final)
           (t :original))))
 
 (defun read-migration-tables (orders)

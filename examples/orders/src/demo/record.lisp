@@ -1,7 +1,7 @@
 ;;;; record.lisp - records snapshots to a file. it also replays
 ;;;;               them and checks them against the audit log.
 
-(in-package #:splice/demo)
+(in-package #:splice-orders/demo)
 
 (defstruct (play-position (:constructor make-position (&key hold)))
   (lock (sb-thread:make-mutex :name "demo-player-position"))
@@ -29,9 +29,9 @@
 
 (defun recording-path (act seed)
   "Where a new recording of ACT goes. It looks like:
-recordings/act-2-seed-2002-20261028T170211.sexp in placed in the splice tree."
+recordings/act-2-seed-2002-20261028T170211.sexp in placed in the example's tree."
   (asdf:system-relative-pathname
-   "splice" (format nil "recordings/act-~d-seed-~d-~a.sexp" act seed (compact-utc-stamp))))
+   "splice-orders" (format nil "recordings/act-~d-seed-~d-~a.sexp" act seed (compact-utc-stamp))))
 
 (defun compact-utc-stamp ()
   (multiple-value-bind (sec min hour day month year) (decode-universal-time (get-universal-time) 0)

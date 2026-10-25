@@ -1,29 +1,36 @@
 ;;;; demo-cluster.lisp: cluster propagation prototype, exercised against
 ;;;; two real SBCL images.
 ;;;;
-;;;;   sbcl --non-interactive --load scripts/demo-cluster.lisp
+;;;;   sbcl --non-interactive --load examples/orders/scripts/demo-cluster.lisp
 ;;;;
 ;;;; Spawns two member SBCL processes, ships them the currency patch set as
 ;;;; source (two-phase prepare/commit, hash-verified), injects the latent
 ;;;; fault on the member at port 7802 only, and lets the conductor's
 ;;;; pooled-SPRT/local-reject aggregation roll back both members.
+;;;;
+;;;; Does not run yet: the TCP transport's RUN-MEMBER and RUN-CONDUCTOR are
+;;;; not written.
 
 (require :asdf)
-(asdf:load-asd (merge-pathnames "../splice.asd" *load-truename*))
-(asdf:load-system "splice")
+(defvar *splice-asd* (merge-pathnames "../../../splice.asd" *load-truename*))
+(defvar *orders-asd* (merge-pathnames "../splice-orders.asd" *load-truename*))
+(asdf:load-asd *splice-asd*)
+(asdf:load-asd *orders-asd*)
+(asdf:load-system "splice/cluster-tcp")
+(asdf:load-system "splice-orders")
 
 (defpackage :splice-cluster-demo (:use :cl))
 (in-package :splice-cluster-demo)
-
-(defvar *root* (namestring (asdf:system-source-directory "splice")))
 
 (defun spawn-member (port)
   (sb-ext:run-program
    "sbcl"
    (list "--non-interactive"
          "--eval" "(require :asdf)"
-         "--eval" (format nil "(asdf:load-asd \"~asplice.asd\")" *root*)
-         "--eval" "(asdf:load-system \"splice\")"
+         "--eval" (format nil "(asdf:load-asd ~s)" (namestring (truename *splice-asd*)))
+         "--eval" (format nil "(asdf:load-asd ~s)" (namestring (truename *orders-asd*)))
+         "--eval" "(asdf:load-system \"splice/cluster-tcp\")"
+         "--eval" "(asdf:load-system \"splice-orders\")"
          "--eval" (format nil "(splice/cluster:run-member :port ~a)" port))
    :search t :wait nil :output nil :error nil))
 

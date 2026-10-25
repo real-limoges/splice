@@ -68,11 +68,20 @@ jobs:
           --eval '(asdf:load-asd (truename "splice.asd"))'
           --eval '(asdf:test-system "splice")'
 
-      # The demo rewrites artifacts/demo-audit.log, which is tracked. That is
-      # harmless in a throwaway checkout, but a step added later that checks for
-      # a clean tree has to run before this one or restore the file.
+      # The cluster systems have no tests yet; loading them checks that they
+      # compile, and that the protocol loads without the orders example.
+      - name: Cluster loads
+        run: >
+          sbcl --non-interactive
+          --eval '(require :asdf)'
+          --eval '(asdf:load-asd (truename "splice.asd"))'
+          --eval '(asdf:load-system "splice/cluster-tcp")'
+
+      # The demo rewrites examples/orders/artifacts/demo-audit.log, which is
+      # tracked. That is harmless in a throwaway checkout, but a step added later
+      # that checks for a clean tree has to run before this one or restore the file.
       - name: Demo
-        run: sbcl --non-interactive --load scripts/demo.lisp
+        run: sbcl --non-interactive --load examples/orders/scripts/demo.lisp
 
       # SPLICE_RUNS=20 is the quick run (about 15 seconds locally); drop it for
       # the full 100 per fault class (about 2 to 4 minutes).
@@ -88,12 +97,13 @@ jobs:
           sbcl --non-interactive
           --eval '(require :asdf)'
           --eval '(asdf:load-asd (truename "splice.asd"))'
-          --eval '(asdf:test-system "splice/criteria")'
+          --eval '(asdf:load-asd (truename "examples/orders/splice-orders.asd"))'
+          --eval '(asdf:test-system "splice-orders/criteria")'
 
       - name: Upload criteria report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: criteria-report-${{ matrix.name }}
-          path: artifacts/criteria-report.md
+          path: examples/orders/artifacts/criteria-report.md
           if-no-files-found: ignore

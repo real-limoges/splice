@@ -1,8 +1,8 @@
 ;;;; package.lisp: the package for the live-image demo's browser-free code.
 
-(defpackage #:splice/demo
+(defpackage #:splice-orders/demo
   (:use #:common-lisp)
-  (:local-nicknames (#:h #:splice/harness))
+  (:local-nicknames (#:orders #:splice-orders))
   (:export
    ;; the snapshot contract
    #:+snapshot-version+ #:*current-act*

@@ -1,10 +1,13 @@
-i;;;; harness-package.lisp: the synthetic workload's package (system splice).
+;;;; package.lisp: the orders example's package (system splice-orders).
 
-(defpackage #:splice/harness
+(defpackage #:splice-orders
   (:use #:common-lisp)
   (:export
    #:run-workload #:run-canary-session #:make-rng #:rng-next #:rng-uniform
-   #:rng-range
+   #:rng-range #:*thread-prefixes*
+
+   ;; the flagship as shippable source, for the cluster
+   #:currency-patch-spec
 
    ;; the application under patch
    #:order #:order-id #:order-cents #:order-discount-code #:order-float-total

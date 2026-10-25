@@ -86,7 +86,7 @@ call cost from ~2x to ~1.5x.")
 
 ;;; Static checks that run at registration, veto early
 
-(defun lambda-list-of (fuction)
+(defun lambda-list-of (function)
   "FUNCTION's lambda list. A generic function answers with declared lambda list."
   (if (typep function 'generic-function)
       (sb-mop:generic-function-lambda-list function)
@@ -109,9 +109,9 @@ This is such a cool use of code as data."
 (defun check-arity-compatibility (ps fp)
   "New implementation must accept every call shape the old one accepted."
   (multiple-value-bind (old-min old-max)
-      (parse-arity (lambda-list-of (fn-patch-old fp)))
+      (parse-arity (lambda-list-of (fn-patch-old-fn fp)))
     (multiple-value-bind (new-min new-max)
-        (parse-arity (lambda-list-of (fn-patch-new fp)))
+        (parse-arity (lambda-list-of (fn-patch-new-fn fp)))
       (when (or (> new-min old-min)
                 (and new-max (or (null old-max) (< new-max old-max))))
         (veto ps :static-arity

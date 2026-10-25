@@ -352,7 +352,7 @@ LLR reaches the upper bound"
   (let ((trigger (rollback-trigger cluster)))
     (if (and trigger (not (cluster-rollback-sent cluster)))
         (values (cluster-with cluster :rollback-sent t)
-                (cons (list :audit :cluster-rllback
+                (cons (list :audit :cluster-rollback
                             :pooled-llr (/ (pooled-llr-milli cluster) 1000.0)
                             :upper (/ (cluster-upper-milli cluster) 1000.0)
                             :trigger trigger)
@@ -526,7 +526,7 @@ the conductor gates only rollback"
     (let ((extra (final-report-fields (member-adapter cluster-member) ps)))
       (member-reply cluster-member
                     (list* :final
-                           :state (spice:patch-set-state ps)
+                           :state (splice:patch-set-state ps)
                            :reversal (splice::patch-set-last-reversal-report ps)
                            extra)))))
 
