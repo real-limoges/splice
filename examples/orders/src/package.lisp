@@ -7,7 +7,7 @@
    #:rng-range #:*thread-prefixes*
 
    ;; the flagship as shippable source, for the cluster
-   #:currency-patch-spec
+   #:currency-patch-spec #:run-orders-member
 
    ;; the application under patch
    #:order #:order-id #:order-cents #:order-discount-code #:order-float-total

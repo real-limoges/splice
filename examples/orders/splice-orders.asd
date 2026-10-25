@@ -16,6 +16,13 @@ rational minor units, and the session driver that runs it under canary."
                              (:file "session")
                              (:file "cluster-spec")))))
 
+(defsystem "splice-orders/cluster"
+  :description "The order workload as a TCP cluster member's host"
+  :depends-on ("splice-orders" "splice/cluster-tcp")
+  :serial t
+  :components ((:module "src"
+                :components ((:file "cluster-member")))))
+
 (defsystem "splice-orders/criteria"
   :description "Executes every success criterion and writes
 artifacts/criteria-report.md with the measured numbers."

@@ -28,7 +28,8 @@ the member. No transport, so like splice it loads no SBCL contribs."
   :serial t
   :components ((:module "src"
                 :components ((:file "cluster-package")
-                             (:file "cluster-protocol")))))
+                             (:file "cluster-protocol"))))
+  :in-order-to ((test-op (test-op "splice/cluster-tests"))))
 
 (defsystem "splice/cluster-tcp"
   :description "The cluster's TCP transport: sexps over sockets."
@@ -58,3 +59,18 @@ the member. No transport, so like splice it loads no SBCL contribs."
                                               (uiop:find-symbol* :splice-tests
                                                                  :splice-tests))
                       (error "splice unit tests failed"))))
+
+(defsystem "splice/cluster-tests"
+  :description "Unit tests for cluster protocol. Shares the unit suite's
+package and fixtures and runs *no* socket."
+  :depends-on ("splice/tests" "splice/custer" "fiveam")
+  :serial t
+  :components ((:module "test/unit"
+                :components ((:file "protocol"))))
+  :perform (test-op (o c)
+                    (declare (ignore o c))
+                    (unless (every (lambda (suite)
+                                     (uiop:symbol-call :fiveam :run!
+                                                       (uiop:find-symbol* suite:splice-tests)))
+                                   '(:cluster-protocol))
+                      (error "splice cluster tests failed"))))
