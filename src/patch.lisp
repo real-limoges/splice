@@ -87,10 +87,11 @@ call cost from ~2x to ~1.5x.")
 ;;; Static checks that run at registration, veto early
 
 (defun lambda-list-of (function)
-  "FUNCTION's lambda list. A generic function answers with declared lambda list."
+  "FUNCTION's lambda list. A generic function answers with declared lambda list.
+A traced function answers with the function under the trace."
   (if (typep function 'generic-function)
       (sb-mop:generic-function-lambda-list function)
-      (sb-kernel:%fun-lambda-list function)))
+      (sb-kernel:%fun-lambda-list (sb-ext:unencapsulated-function function))))
 
 (defun parse-arity (lambda-list)
   "(values min-args max-args-or-nil). NIL max means &rest/&key.

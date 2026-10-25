@@ -1,6 +1,25 @@
 ;;;; cluster-protocol.lisp: cluster protocol with no transport
 ;;;;
-;;;; Blah blah blah
+;;;; One conductor and N members exchange lists headed by a keyword. PREPARE
+;;;; ships a patch set as source text plus a hash; each member compiles it
+;;;; and runs the static checks, and any veto aborts the cluster. COMMIT
+;;;; starts each member's local canary. Members report SPRT health; the
+;;;; conductor sums their LLRs and broadcasts ROLLBACK on a member's local
+;;;; rollback or a pooled reject.
+;;;;
+;;;; Nothing here opens a socket or reads a stream. A transport hands what
+;;;; arrives to CONDUCTOR-RECEIVE or MEMBER-RECEIVE, and gives each side an
+;;;; adapter: an object with methods on SEND-TO-MEMBER (the conductor's) or
+;;;; on SEND-TO-CONDUCTOR, MEMBER-COMMITTED and FINAL-REPORT-FIELDS (a
+;;;; member's), which the protocol calls back through. Every value in a
+;;;; message is a keyword, a string, an integer or a list of those, so any
+;;;; wire that carries those carries the protocol unchanged.
+;;;;
+;;;; Limitations:
+;;;; - contracts run at COMMIT (inside INSTALL), not PREPARE.
+;;;; - members ramp independently; the conductor gates only rollback (T3).
+;;;; - no partition handling and no timeouts; a transport reports a dead
+;;;;   link as (:gone).
 
 (in-package #:splice/cluster)
 
@@ -24,6 +43,8 @@ VALUE holds *only* keywords, strings, integers, and lists"
 (defun spec-with-hash (spec)
   "SPEC wiht :HASH set to its SPEC-HASH as the first field"
   (list* :hash (spec-hash spec) (spec-without-hash spec)))
+
+;;; Build patch set from a spec (member's side o PREPARE)
 
 (defun spec-field (spec key)
   "SPEC's KEY field. Errors without"
@@ -54,10 +75,6 @@ error, not a fresh symbol"
     (unless status
       (error "~a names nothing in ~a" name (package-name package)))
     symbol))
-
-;;; Step - transition for one conductor events (add member, ship, receive)
-;;; Returns: (values next-cluster effects) where:
-;;;   effect is (:send message-id message) OR (:audit event . fields)
 
 (defun spec-fn-patch (entry package)
   "FN-PATCH from a spec's (NAME TEXT) function entry"
@@ -209,7 +226,10 @@ for ALPHA and BETA (as each member's SPRT does)"
          :pooled-sprt-reject)
         (t nil)))
 
-;;; Step
+;;; Step - Transition for one conductor event (add a member, ship or receive a message)
+;;; Every function from here through progress returns the same
+;;; (values next-cluster effects) where effects are
+;;; (:send member-id message) or (:audit event . field)
 
 (defun step-add-member (cluster id)
   "CLUSTER with member ID added. Members join only before patch ships"
@@ -336,7 +356,9 @@ and reports :DIED"
          (values (cluster-with cluster :phase :done)
                  (cons (list :audit :cluster-final :reports (cluster-finals cluster))
                        (broadcast cluster '(:bye))))
-         (values cluster '())))))
+         (values cluster '())))
+    (t
+     (values cluster '()))))
 
 (defun progress-running (cluster)
   "Roll back (if called for) then report back when every member is terminal"
@@ -359,7 +381,7 @@ LLR reaches the upper bound"
                       (broadcast cluster '(:rollback))))
         (values cluster '()))))
 
-;;; Conductor's Adapter
+;;; Conductor's Adapter - Each one defines a method for its own type
 
 (defgeneric send-to-member (adapter member-id message)
   (:documentation "Deliver MESSAGE to the member ADAPTER knows as MEMBER-ID.
@@ -371,7 +393,8 @@ into that conductor on the same thread"))
 (defstruct (conductor (:constructor %make-conductor (adapter cluster)))
   (adapter nil :read-only t)
   (lock (sb-thread:make-mutex :name "splice conductor") :read-only t)
-  cluster)                              ; mutable
+  ;; mutable
+  cluster)                              ; the current cluster value, replaced whole
 
 (defun make-conductor (&key adapter (alpha 0.01d0) (beta 0.05d0))
   "A conductor with no members. Every message goes through SEND-TO-MEMBER
@@ -419,7 +442,8 @@ Safe to call from several threads! Returns the phase after it"
   "Each member's final report (:MEMBER id :STATE state ...) in the order added"
   (cluster-finals (conductor-cluster conductor)))
 
-;;; Member's adapter
+;;; Member's adapter - Each one defines methods for its own type.
+;;; Only SEND-TO-CONDUCTOR has no default.
 
 (defgeneric send-to-conductor (adapter message)
   (:documentation "Deliver MESSAGE from member to conductor. A member
@@ -446,8 +470,9 @@ the set's last transition"))
   (declare (ignore adapter patch-set))
   '())
 
-;;; Members. Called CLUSTER-MEMBER because MEMBER is a COMMON-LISP symbol;
-;;; accessors are MEMBER-, like the rest of the member functions
+;;; Members. Called CLUSTER-MEMBER because MEMBER is a COMMON-LISP symbol.
+;;; The accessors are MEMBER-, like the rest of the member functions due to a
+;;; little trickery.
 
 (defstruct (cluster-member (:conc-name member-)
                            (:constructor %make-cluster-member (adapter)))

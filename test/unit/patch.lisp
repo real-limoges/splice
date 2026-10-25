@@ -208,4 +208,11 @@
                   (splice::parse-arity (sb-introspect:function-lambda-list f))))
           "arity of ~a" f))))
 
+(test lambda-list-of-reads-through-a-trace
+  (unwind-protect
+       (progn
+         (trace probe-two)
+         (is (equal '(a b) (splice::lambda-list-of (fdefinition 'probe-two)))))
+    (untrace probe-two)))
+
 ()
