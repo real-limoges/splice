@@ -89,9 +89,11 @@ call cost from ~2x to ~1.5x.")
 (defun lambda-list-of (function)
   "FUNCTION's lambda list. A generic function answers with declared lambda list.
 A traced function answers with the function under the trace."
-  (if (typep function 'generic-function)
-      (sb-mop:generic-function-lambda-list function)
-      (sb-kernel:%fun-lambda-list (sb-ext:unencapsulated-function function))))
+  (let ((lambda-list
+          (if (typep function 'generic-function)
+              (sb-mop:generic-function-lambda-list function)
+              (sb-kernel:%fun-lambda-list (sb-ext:unencapsulated-function function)))))
+    (if (listp lambda-list) lambda-list :unknown)))
 
 (defun parse-arity (lambda-list)
   "(values min-args max-args-or-nil). NIL max means &rest/&key.
@@ -109,10 +111,18 @@ This is such a cool use of code as data."
 
 (defun check-arity-compatibility (ps fp)
   "New implementation must accept every call shape the old one accepted."
-  (multiple-value-bind (old-min old-max)
-      (parse-arity (lambda-list-of (fn-patch-old-fn fp)))
-    (multiple-value-bind (new-min new-max)
-        (parse-arity (lambda-list-of (fn-patch-new-fn fp)))
+  (let ((old (lambda-list-of (fn-patch-old-fn fp)))
+        (new (lambda-list-of (fn-patch-new-fn fp))))
+    (if (or (eq :unknown old) (eq :unknown new))
+        (veto ps :static-arity
+              (format nil "~a: the ~a code's lambda list can't be read (compiled with (debug 0)?)"
+                      (fn-patch-name fp) (if (eq :unknown old) "old" "new")))
+        (check-arity-covers ps fp old new))))
+
+(defun check-arity-covers (ps fp old new)
+  "Veto PS unless lambda list NEW accepts every call shape lambda list OLD does"
+  (multiple-value-bind (old-min old-max) (parse-arity old)
+    (multiple-value-bind (new-min new-max) (parse-arity new)
       (when (or (> new-min old-min)
                 (and new-max (or (null old-max) (< new-max old-max))))
         (veto ps :static-arity
@@ -370,11 +380,18 @@ call goes through &REST and APPLY, so it is slower than a fixed-arity shim."
   "Shim routing FP's function on the task's pinned route."
   (let ((old (fn-patch-old-fn fp))
         (new (fn-patch-new-fn fp)))
-    (multiple-value-bind (min max)
-        (parse-arity (lambda-list-of old))
-      (if (and max (= min max))
-          (funcall (shim-factory min) ps old new)
-          (variadic-shim ps old new)))))
+    (let ((arity (fixed-arity (lambda-list-of old))))
+      (if (eq :variadic arity)
+          (variadic-shim ps old new)
+          (funcall (shim-factory arity) ps old new)))))
+
+(defun fixed-arity (lambda-list)
+  "The one argument count LAMBDA-LIST takes, or :VARIADIC when it takes a
+range or can't be read"
+  (if (eq :unknown lambda-list)
+      :variadic
+      (multiple-value-bind (min max) (parse-arity lambda-list)
+        (if (and max (= min max)) min :variadic))))
 
 (defun install-fn-shims (ps)
   (dolist (fp (patch-set-fn-patches ps))

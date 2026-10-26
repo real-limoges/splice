@@ -63,7 +63,7 @@ the member. No transport, so like splice it loads no SBCL contribs."
 (defsystem "splice/cluster-tests"
   :description "Unit tests for cluster protocol. Shares the unit suite's
 package and fixtures and runs *no* socket."
-  :depends-on ("splice/tests" "splice/custer" "fiveam")
+  :depends-on ("splice/tests" "splice/cluster" "fiveam")
   :serial t
   :components ((:module "test/unit"
                 :components ((:file "protocol"))))
@@ -71,6 +71,6 @@ package and fixtures and runs *no* socket."
                     (declare (ignore o c))
                     (unless (every (lambda (suite)
                                      (uiop:symbol-call :fiveam :run!
-                                                       (uiop:find-symbol* suite:splice-tests)))
+                                                       (uiop:find-symbol* suite :splice-tests)))
                                    '(:cluster-protocol))
                       (error "splice cluster tests failed"))))

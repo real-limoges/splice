@@ -27,7 +27,8 @@
   "VALUE printed identically, whatever the caller's printer settings.
 VALUE holds *only* keywords, strings, integers, and lists"
   (with-standard-io-syntax
-    (let ((*print-pretty* nil))
+    (let ((*print-pretty* nil)
+          (*print-readably* nil))
       (prin1-to-string value))))
 
 (defun spec-without-hash (spec)

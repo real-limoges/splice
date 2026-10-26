@@ -33,10 +33,10 @@ text never runs here"
 (defun audit-log-report (log-path)
   "TCP member's own :final fields. The chain and reconstruction checks
 of its closed audit log"
-  (multiple-value-bind (ok entry count) (splice:verify-audit-chain log-path)
+  (multiple-value-bind (ok entry-count) (splice:verify-audit-chain log-path)
     (list :chain-ok ok
-          :entries entry-coun
-          :reconstruction-ok (and (splice:verify-reconstruction log-path t)))))
+          :entries entry-count
+          :reconstruction-ok (and (splice:verify-reconstruction log-path) t))))
 
 (defstruct (tcp-member-adapter
             (:constructor make-tcp-member-adapter (stream log-path host)))
@@ -60,7 +60,7 @@ done before the log closes"
             host-fields)))
 
 (defun run-member (&key (port 7801)
-                     (log-path (format nil "/tmp/splice-member-~a.log port"))
+                     (log-path (format nil "/tmp/splice-member-~a.log" port))
                      host)
   "Serve a conductor connection on loopback PORT with the cluster protocol.
 HOST (if given) gets MEMBER-COMMITTED and FINAL-REPORT-FIELDS"
@@ -97,16 +97,16 @@ HOST (if given) gets MEMBER-COMMITTED and FINAL-REPORT-FIELDS"
 
 (defstruct (tcp-conductor-adapter
             (:constructor make-tcp-conductor-adapter (streams)))
-  (stream nil :read-only t))            ; ((port . stream) ...)
+  (streams nil :read-only t))           ; ((port . stream) ...)
 
 (defmethod send-to-member ((adapter tcp-conductor-adapter) port message)
   "Write MESSAGE to member at PORT. Failed writes are dropped. Member's reader
 sends (:GONE) once its stream ends"
   (ignore-errors
-   (send-form (cdr (assoc port (tcp-conductor-adapter-stream adapter)))
+   (send-form (cdr (assoc port (tcp-conductor-adapter-streams adapter)))
               message)))
 
-(defun start-conductor-read (conductor port stream)
+(defun start-conductor-reader (conductor port stream)
   "Thread handing every message from PORT to CONDUCTOR, then (:GONE)
 once the stream ends"
   (sb-thread:make-thread
@@ -124,8 +124,8 @@ once the stream ends"
         do (sleep 0.05)
         finally (return phase)))
 
-(defun run-conductor spec members-spec &key ((alpha 0.01d0) (beta 0.05d0)
-                                             (log-path "/tmp/splice-conductor.log"))
+(defun run-conductor (spec members-spec &key (alpha 0.01d0) (beta 0.05d0)
+                                          (log-path "/tmp/splice-conductor.log"))
   "MEMBERS-SPEC is a list of (host port). Ship SPEC to every member over TCP to run
 the cluster to the end. Returns one final report per member, which is a plist headed :PORT.
 Signals an error if a member vetoed"
@@ -147,6 +147,8 @@ Signals an error if a member vetoed"
       (conductor-ship conductor spec)
       (let ((phase (wait-for-phase conductor '(:done :aborted))))
         (dolist (reader readers)
+          (sb-thread:join-thread reader :default nil :timeout 10))
+        (dolist (entry streams)
           (ignore-errors (close (cdr entry))))
         (splice:close-audit-log)
         (when (eq phase :aborted)

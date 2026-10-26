@@ -72,6 +72,13 @@
                                              (lambda (a) a)))))
       (is (eq :static-arity (splice:patch-vetoed-contract veto))))))
 
+(test new-code-with-an-unreadable-lambda-list-is-vetoed
+  (with-patch-set-names (arity-unknown)
+    (let* ((ps (fn-patch-set 'arity-unknown 'probe-two (unreadable-probe)))
+           (veto (register-veto ps)))
+      (is (eq :static-arity (splice:patch-vetoed-contract veto)))
+      (is (eq :vetoed (splice:patch-set-state ps))))))
+
 (test patching-an-unbound-function-is-vetoed
   (with-patch-set-names (missing-fn)
     (let ((veto (register-veto (fn-patch-set 'missing-fn 'no-such-function-anywhere
@@ -197,16 +204,31 @@
                       #'probe-two
                       (compile nil '(lambda (a &optional b) (list a b)))
                       (funcall (compile nil '(lambda (x) (lambda (a b) (+ a b x)))) 1)
-                      #'print-object
-                      (compile nil '(lambda (a &key k)
-                                     (declare (optimize (debug 0)))
-                                     (list a k))))))
+                      #'print-object)))
     (dolist (f cases)
       (is (equal (multiple-value-list
                   (splice::parse-arity (splice::lambda-list-of f)))
                  (multiple-value-list
                   (splice::parse-arity (sb-introspect:function-lambda-list f))))
           "arity of ~a" f))))
+
+(defun unreadable-probe ()
+  "A two-argument function whose lambda list (debug 0) leaves unrecorded"
+  (compile nil '(lambda (a b)
+                 (declare (optimize (debug 0)))
+                 (list a b))))
+
+(test lambda-list-of-names-an-unreadable-lambda-list
+  (is (eq :unknown (splice::lambda-list-of (unreadable-probe))))
+  (is (eq :unknown (splice::lambda-list-of
+                    (compile nil '(lambda (a &key k)
+                                   (declare (optimize (debug 0)))
+                                   (list a k)))))))
+
+(test an-unreadable-lambda-list-gets-a-variadic-shim
+  (is (eq :variadic (splice::fixed-arity :unknown)))
+  (is (eq :variadic (splice::fixed-arity '(a &optional b))))
+  (is (= 2 (splice::fixed-arity '(a b)))))
 
 (test lambda-list-of-reads-through-a-trace
   (unwind-protect

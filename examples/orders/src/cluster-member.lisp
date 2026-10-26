@@ -1,7 +1,7 @@
 ;;;; cluster-member.lisp: orders workload as a TCP cluster member's host
 ;;;; (system splice-orders/cluster)
 
-(in-package $:splice-orders)
+(in-package #:splice-orders)
 
 (defstruct (orders-workload
             (:constructor make-orders-workload (port orders)))
@@ -21,17 +21,17 @@ the pre-existing orders that must survive the migration. Returns the orders"
 (defun workload-order (rng i orders)
   "Take I's order. Every eleventh a pre-existing one, otherwise a fresh one"
   (if (zerop (mod i 11))
-      (nth (mod (rnt-next rng) (length orders)) orders)
+      (nth (mod (rng-next rng) (length orders)) orders)
       (make-instance 'order
                      :id i
-                     :item-count (rnt-range rng 1 9)
+                     :item-count (rng-range rng 1 9)
                      :unit-price (/ (rng-range rng 100 9999) 100.0)
                      :discount-code (case (mod (rng-next rng) 5)
                                       (0 "TEN") (1 "VIP") (t nil)))))
 
 (defun workload-done-p (ps)
   "True once PS has left canary stages"
-  (not (splice::canary-state-p (splice:patch-set-state ps))))
+  (not (splice::canary-stage-p (splice:patch-set-state ps))))
 
 (defun run-member-workload (workload cluster-member ps)
   "Drive orders until PS leaves canary stages or WORKLOAD is stopping,
@@ -60,11 +60,11 @@ sending the conductor CLUSTER-MEMBER's health every 200 tasks"
   (let ((worker (orders-workload-worker workload)))
     (when worker
       (ignore-errors (sb-thread:join-thread worker))))
-  (list :mixed (coherance-violations)))
+  (list :mixed (coherence-violations)))
 
-(defun run-orders-member (&key ((port 7801)
-                                (log-path (format nil "/tmp/splice-member-~a.log" port))
-                                fault))
+(defun run-orders-member (&key (port 7801)
+                               (log-path (format nil "/tmp/splice-member-~a.log" port))
+                               fault)
   "Serve cluster on loopback PORT, driving the orders workload once committed.
 FAULT (a fault kind) is injected into this member only."
   (splice/cluster:run-member
