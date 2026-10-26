@@ -125,6 +125,18 @@ the new code always fails, so the error SPRT rejects at its floor of 5"
     (is (equal '((:a (:bye)) (:b (:bye))) (sends effects)))
     (is (equal '(:cluster-abort) (audit-kinds effects)))))
 
+(test an-abort-during-commit-rolls-back-before-bye
+  (multiple-value-bind (committing effects)
+      (stepped (shipped-cluster :a :b)
+               '(:a (:prepared :name "P"))
+               '(:b (:prepared :name "P")))
+    (declare (ignore effects))
+    (multiple-value-bind (cluster abort)
+        (stepped committing '(:b (:veto :reason "contract failed")))
+      (is (eq :aborted (splice/cluster::cluster-phase cluster)))
+      (is (equal '((:a (:rollback)) (:b (:rollback)) (:a (:bye)) (:b (:bye)))
+                 (sends abort))))))
+
 (test the-pooled-llr-rolls-back-once
   (multiple-value-bind (cluster effects)
       (stepped (running-cluster :a :b)
@@ -142,6 +154,14 @@ the new code always fails, so the error SPRT rejects at its floor of 5"
     (declare (ignore cluster))
     (is (equal '((:a (:rollback)) (:b (:rollback))) (sends effects)))
     (is (eq :member-local-reject
+            (getf (cddr (find :audit effects :key #'first)) :trigger)))))
+
+(test a-stalled-member-rolls-back-the-cluster
+  (multiple-value-bind (cluster effects)
+      (stepped (running-cluster :a :b) '(:a (:stalled :state :canary-25)))
+    (is (eq :running (splice/cluster::cluster-phase cluster)))
+    (is (equal '((:a (:rollback)) (:b (:rollback))) (sends effects)))
+    (is (eq :member-stalled
             (getf (cddr (find :audit effects :key #'first)) :trigger)))))
 
 (test terminal-members-are-asked-for-reports-then-told-bye
@@ -177,6 +197,32 @@ the new code always fails, so the error SPRT rejects at its floor of 5"
       (is (eq cluster same))
       (is (equal '(:cluster-unknown-member :cluster-unknown-message)
                  (audit-kinds audits))))))
+
+(test malformed-messages-change-nothing
+  (let ((cluster (running-cluster :a :b)))
+    (multiple-value-bind (same audits)
+        (stepped cluster
+                 '(:a :not-a-message)
+                 '(:a (:health :state :canary-5 :n 10 :odd))
+                 '(:a (:health :state :canary-5 :n 10)))
+      (is (eq cluster same))
+      (is (equal '(:cluster-bad-message :cluster-bad-message :cluster-bad-message)
+                 (audit-kinds audits))))))
+
+(test the-shipped-spec-carries-the-conductors-error-rates
+  (let* ((wire (make-test-wire))
+         (conductor (splice/cluster:make-conductor :adapter wire
+                                                   :alpha 0.001d0 :beta 0.1d0)))
+    (splice/cluster:conductor-add-member conductor :m1)
+    (splice/cluster:conductor-ship conductor (probe-spec))
+    (let ((spec (getf (rest (cdr (wire-take wire))) :spec)))
+      (is (= 1000 (getf spec :alpha-ppm)))
+      (is (= 100000 (getf spec :beta-ppm)))
+      (unwind-protect
+           (let ((ps (splice/cluster:build-patch-set spec)))
+             (is (= 0.001d0 (splice::patch-set-alpha ps)))
+             (is (= 0.1d0 (splice::patch-set-beta ps))))
+        (splice:unregister-patch-set 'protocol-probe-set)))))
 
 ;;; A conductor and a member in this image, but no socket
 

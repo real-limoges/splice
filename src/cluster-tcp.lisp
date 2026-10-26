@@ -45,7 +45,9 @@ of its closed audit log"
   (host nil :read-only t))
 
 (defmethod send-to-conductor ((adapter tcp-member-adapter) message)
-  (send-form (tcp-member-adapter-stream adapter) message))
+  "Write MESSAGE to the conductor. A failed write is dropped: the watch thread
+can outlive the connection after an abort's :BYE"
+  (ignore-errors (send-form (tcp-member-adapter-stream adapter) message)))
 
 (defmethod member-committed ((adapter tcp-member-adapter) cluster-member ps)
   "Hand commit to host. It starts its workload if it has one"
@@ -66,24 +68,33 @@ done before the log closes"
 HOST (if given) gets MEMBER-COMMITTED and FINAL-REPORT-FIELDS"
   (let ((server (make-instance 'sb-bsd-sockets:inet-socket
                                :type :stream :protocol :tcp)))
-    (setf (sb-bsd-sockets:sockopt-reuse-address server) t)
-    (sb-bsd-sockets:socket-bind server #(127 0 0 1) port)
-    (sb-bsd-sockets:socket-listen server 1)
-    (splice:open-audit-log log-path)
-    (let* ((stream (sb-bsd-sockets:socket-make-stream
-                    (sb-bsd-sockets:socket-accept server) :input t :output t))
-           (cluster-member (make-member
-                            :adapter (make-tcp-member-adapter stream log-path host))))
-      (loop (let ((message (read-form stream)))
-              (when (or (eq message :eof)
-                        (eq :bye (member-receive cluster-member message)))
-                (return))))
-      (ignore-errors (close stream))
+    (unwind-protect
+         (progn
+           (setf (sb-bsd-sockets:sockopt-reuse-address server) t)
+           (sb-bsd-sockets:socket-bind server #(127 0 0 1) port)
+           (sb-bsd-sockets:socket-listen server 1)
+           (splice:open-audit-log log-path)
+           (serve-conductor server log-path host))
+      (splice:close-audit-log)
       (sb-bsd-sockets:socket-close server))))
+
+(defun serve-conductor (server log-path host)
+  "Accept one conductor on SERVER and act on its messages until :BYE or
+the stream ends, closing the stream however it stops"
+  (let ((stream (sb-bsd-sockets:socket-make-stream
+                 (sb-bsd-sockets:socket-accept server) :input t :output t)))
+    (unwind-protect
+         (let ((cluster-member (make-member
+                                :adapter (make-tcp-member-adapter stream log-path host))))
+           (loop (let ((message (read-form stream)))
+                   (when (or (eq message :eof)
+                             (eq :bye (member-receive cluster-member message)))
+                     (return)))))
+      (ignore-errors (close stream)))))
 
 ;;; Conductor over TCP
 
-(defun connect-member (port &key (retries 40))
+(defun connect-member (port &key (retries 240))
   "A stream to the member on loopback PORT, retrying while it starts."
   (loop for attempt from 1 do
     (handler-case
@@ -112,8 +123,10 @@ once the stream ends"
   (sb-thread:make-thread
    (lambda ()
      (loop for message = (ignore-errors (read-form stream))
-           until (or (null message) (eq message :eof))
-           do (conductor-receive conductor port message))
+           until (or (null message)
+                     (eq message :eof)
+                     (eq :failed (handler-case (conductor-receive conductor port message)
+                                   (error () :failed)))))
      (conductor-receive conductor port '(:gone)))
    :name (format nil "conductor-reader-~a" port)))
 
@@ -130,15 +143,22 @@ once the stream ends"
 the cluster to the end. Returns one final report per member, which is a plist headed :PORT.
 Signals an error if a member vetoed"
   (splice:open-audit-log log-path)
-  (let* ((streams (mapcar (lambda (member-spec)
-                            (destructuring-bind (host port) member-spec
-                              (declare (ignore host))
-                              (cons port (connect-member port))))
-                          members-spec))
-         (conductor (make-conductor
-                     :alpha alpha
-                     :beta beta
-                     :adapter (make-tcp-conductor-adapter streams))))
+  (let ((streams '()))                  ; ((port . stream) ...), newest first
+    (unwind-protect
+         (progn
+           (dolist (member-spec members-spec)
+             (let ((port (second member-spec)))
+               (push (cons port (connect-member port)) streams)))
+           (conduct-cluster spec (reverse streams) alpha beta log-path))
+      (dolist (entry streams)
+        (ignore-errors (close (cdr entry))))
+      (splice:close-audit-log))))
+
+(defun conduct-cluster (spec streams alpha beta log-path)
+  "Run the cluster over STREAMS, ((port . stream) ...), to the end, and return
+each member's final report headed :PORT. Signals an error if it aborted"
+  (let ((conductor (make-conductor :alpha alpha :beta beta
+                                   :adapter (make-tcp-conductor-adapter streams))))
     (dolist (entry streams)
       (conductor-add-member conductor (car entry)))
     (let ((readers (mapcar (lambda (entry)
@@ -148,9 +168,6 @@ Signals an error if a member vetoed"
       (let ((phase (wait-for-phase conductor '(:done :aborted))))
         (dolist (reader readers)
           (sb-thread:join-thread reader :default nil :timeout 10))
-        (dolist (entry streams)
-          (ignore-errors (close (cdr entry))))
-        (splice:close-audit-log)
         (when (eq phase :aborted)
           (error "a member refused the cluster patch. see ~a" log-path))
         (mapcar (lambda (final)

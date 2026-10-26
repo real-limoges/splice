@@ -45,6 +45,14 @@ VALUE holds *only* keywords, strings, integers, and lists"
   "SPEC wiht :HASH set to its SPEC-HASH as the first field"
   (list* :hash (spec-hash spec) (spec-without-hash spec)))
 
+(defun spec-with-error-rates (spec alpha-ppm beta-ppm)
+  "SPEC carrying the cluster's SPRT error rates in parts per million, last,
+in place of any it already had"
+  (append (loop for (key value) on spec by #'cddr
+                unless (member key '(:alpha-ppm :beta-ppm))
+                  append (list key value))
+          (list :alpha-ppm alpha-ppm :beta-ppm beta-ppm)))
+
 ;;; Build patch set from a spec (member's side o PREPARE)
 
 (defun spec-field (spec key)
@@ -108,6 +116,18 @@ it's just a label in the audit log."
                              :check-fn (compile nil form)
                              :source form))))
 
+(defun spec-error-rate-args (spec)
+  "SPEC's :ALPHA-PPM and :BETA-PPM as MAKE-PATCH-SET's :ALPHA and :BETA,
+leaving out any SPEC lacks so the patch set's defaults apply"
+  (flet ((rate-arg (spec-key arg-key)
+           (let ((ppm (getf spec spec-key)))
+             (when ppm
+               (unless (and (integerp ppm) (< 0 ppm 1000000))
+                 (error "patch spec ~s is ~s, not parts per million" spec-key ppm))
+               (list arg-key (/ ppm 1d6))))))
+    (append (rate-arg :alpha-ppm :alpha)
+            (rate-arg :beta-ppm :beta))))
+
 (defun build-patch-set (spec)
   "Check SPEC's hash, compile its source, and register the set.
 Signals error + registers nothing when the hash mismatches, a missing name
@@ -116,18 +136,19 @@ or PATCH-VETOED when a static check refuses."
     (error "patch spec hash mismatch"))
   (let ((package (spec-package spec)))
     (splice:register-patch-set
-     (splice::make-patch-set
-      :name (intern (spec-field spec :name) package)
-      :description (getf spec :description)
-      :ramp (spec-field spec :ramp)
-      :sprt-min-n (spec-field spec :min-n)
-      :sprt-max-n (spec-field spec :max-n)
-      :fn-patches (mapcar (lambda (entry) (spec-fn-patch entry package))
-                          (getf spec :functions))
-      :class-patches (mapcar (lambda (entry) (spec-class-patch entry package))
-                             (getf spec :classes))
-      :contracts (mapcar (lambda (entry) (spec-contract entry package))
-                         (getf spec :contracts))))))
+     (apply #'splice::make-patch-set
+            :name (intern (spec-field spec :name) package)
+            :description (getf spec :description)
+            :ramp (spec-field spec :ramp)
+            :sprt-min-n (spec-field spec :min-n)
+            :sprt-max-n (spec-field spec :max-n)
+            :fn-patches (mapcar (lambda (entry) (spec-fn-patch entry package))
+                                (getf spec :functions))
+            :class-patches (mapcar (lambda (entry) (spec-class-patch entry package))
+                                   (getf spec :classes))
+            :contracts (mapcar (lambda (entry) (spec-contract entry package))
+                               (getf spec :contracts))
+            (spec-error-rate-args spec)))))
 
 ;;; Conductor's view of the cluster as a value.
 
@@ -216,13 +237,21 @@ for ALPHA and BETA (as each member's SPRT does)"
   "Members' latest LLRs summed. Independent add"
   (reduce #'+ (cluster-members cluster) :key #'member-view-llr-milli))
 
+(defun member-rolled-back-p (view)
+  "True once member VIEW has rolled back, or is rolling back, on its own"
+  (or (eq :rolled-back (member-view-terminal view))
+      (splice::rolling-back-p (member-view-state view))))
+
+(defun member-stalled-p (view)
+  "True once member VIEW reported its set still undecided after its watch timed out"
+  (eq :stalled (member-view-state view)))
+
 (defun rollback-trigger (cluster)
   "Why the cluster should roll back right now or NIL"
-  (cond ((some (lambda (view)
-                 (or (eq :rolled-back (member-view-terminal view))
-                     (member (member-view-state view) '(:rolling-back :restoring))))
-               (cluster-members cluster))
+  (cond ((some #'member-rolled-back-p (cluster-members cluster))
          :member-local-reject)
+        ((some #'member-stalled-p (cluster-members cluster))
+         :member-stalled)
         ((>= (pooled-llr-milli cluster) (cluster-upper-milli cluster))
          :pooled-sprt-reject)
         (t nil)))
@@ -259,13 +288,24 @@ for ALPHA and BETA (as each member's SPRT does)"
   "Conductor's response ot MESSAGE from member ID. Fold the message into the
 member's view + do whatever the cluster now calls for."
   (let ((view (find-view cluster id)))
-    (if (null view)
-        (values cluster
-                (list (list :audit :cluster-unknown-member
-                            :member id :kind (first message))))
-        (multiple-value-bind (folded effects) (fold-message cluster view message)
-          (multiple-value-bind (next more) (progress-phase folded)
-            (values next (append effects more)))))))
+    (cond ((not (message-p message))
+           (values cluster
+                   (list (list :audit :cluster-bad-message :member id))))
+          ((null view)
+           (values cluster
+                   (list (list :audit :cluster-unknown-member
+                               :member id :kind (first message)))))
+          (t
+           (multiple-value-bind (folded effects) (fold-message cluster view message)
+             (multiple-value-bind (next more) (progress-phase folded)
+               (values next (append effects more))))))))
+
+(defun message-p (value)
+  "True when VALUE has a message's shape: a keyword, then a property list"
+  (and (consp value)
+       (keywordp (first value))
+       (null (cdr (last value)))
+       (evenp (length (rest value)))))
 
 ;;; Fold - take one members message into its own view, dispatched
 ;;; on the message type.
@@ -283,11 +323,9 @@ Phase changes are PROGRESS-PHASE's job"
       (:veto
        (fold-abort cluster (member-view-id view) (getf fields :reason)))
       (:health
-       (destructuring-bind (&key state n llr-milli &allow-other-keys) fields
-         (values (with-view cluster (member-view-with view :state state
-                                                           :n n
-                                                           :llr-milli llr-milli))
-                 '())))
+       (fold-health cluster view fields))
+      (:stalled
+       (values (with-view cluster (member-view-with view :state :stalled)) '()))
       (:terminal
        (let ((state (getf fields :state)))
          (values (with-view cluster (member-view-with view :state state
@@ -306,13 +344,31 @@ Phase changes are PROGRESS-PHASE's job"
                            :member (member-view-id view)
                            :kind (first message))))))))
 
+(defun fold-health (cluster view fields)
+  "CLUSTER after member VIEW's :HEALTH FIELDS, or unchanged with an audit
+when the fields are not a keyword state and integer counts"
+  (let ((state (getf fields :state))
+        (n (getf fields :n))
+        (llr-milli (getf fields :llr-milli)))
+    (if (and (keywordp state) (integerp n) (integerp llr-milli))
+        (values (with-view cluster (member-view-with view :state state
+                                                          :n n
+                                                          :llr-milli llr-milli))
+                '())
+        (values cluster
+                (list (list :audit :cluster-bad-message
+                            :member (member-view-id view) :kind :health))))))
+
 (defun fold-abort (cluster id reason)
   "CLUSTER aborted because member ID refused it or vanished.
-:BYE to every member, and only PREPARE and COMMIT can be refused"
+Only PREPARE and COMMIT can be refused. Every member gets :BYE, after a
+:ROLLBACK during COMMIT, since a member that already installed is canarying"
   (if (member (cluster-phase cluster) '(:preparing :committing))
       (values (cluster-with cluster :phase :aborted)
-              (cons (list :audit :cluster-abort :member id :reason reason)
-                    (broadcast cluster '(:bye))))
+              (append (list (list :audit :cluster-abort :member id :reason reason))
+                      (when (eq :committing (cluster-phase cluster))
+                        (broadcast cluster '(:rollback)))
+                      (broadcast cluster '(:bye))))
       (values cluster '())))
 
 (defun fold-gone (cluster view)
@@ -391,8 +447,11 @@ into that conductor on the same thread"))
 
 ;;; Conductor: Cluster value behidn a lock and the effects it calls for
 
-(defstruct (conductor (:constructor %make-conductor (adapter cluster)))
+(defstruct (conductor (:constructor %make-conductor
+                          (adapter alpha-ppm beta-ppm cluster)))
   (adapter nil :read-only t)
+  (alpha-ppm 0 :read-only t)            ; shipped in every spec it sends
+  (beta-ppm 0 :read-only t)
   (lock (sb-thread:make-mutex :name "splice conductor") :read-only t)
   ;; mutable
   cluster)                              ; the current cluster value, replaced whole
@@ -400,7 +459,10 @@ into that conductor on the same thread"))
 (defun make-conductor (&key adapter (alpha 0.01d0) (beta 0.05d0))
   "A conductor with no members. Every message goes through SEND-TO-MEMBER
 on ADAPTER. It goes in teh order it decided them and holds its lock"
-  (%make-conductor adapter (empty-cluster alpha beta)))
+  (let ((alpha-ppm (round (* alpha 1000000)))
+        (beta-ppm (round (* beta 1000000))))
+    (%make-conductor adapter alpha-ppm beta-ppm
+                     (empty-cluster (/ alpha-ppm 1d6) (/ beta-ppm 1d6)))))
 
 (defun run-conductor-effect (conductor effect)
   (ecase (first effect)
@@ -427,7 +489,10 @@ and returns NEXT's phase"
 (defun conductor-ship (conductor patch-set-forms)
   "Start PREPARE. Send every member PATCH-SET-FORMS, a spec plist with hashes
 computed here. Return the phase, :PREPARING"
-  (let ((spec (spec-with-hash patch-set-forms)))
+  (let ((spec (spec-with-hash
+               (spec-with-error-rates patch-set-forms
+                                      (conductor-alpha-ppm conductor)
+                                      (conductor-beta-ppm conductor)))))
     (conductor-advance conductor (lambda (cluster) (step-ship cluster spec)))))
 
 (defun conductor-receive (conductor member-id message)
@@ -498,8 +563,15 @@ Returns MESSAGE's kind"
     (:commit (member-commit cluster-member))
     (:rollback (member-rollback cluster-member))
     (:report (member-report cluster-member))
-    (:bye nil))
+    (:bye (member-bye cluster-member)))
   (first message))
+
+(defun member-bye (cluster-member)
+  "Let a set that is rolling back finish, so its last audit entries are written
+before the transport closes the log. An abort during COMMIT ends this way"
+  (let ((ps (member-patch-set cluster-member)))
+    (when (and ps (splice::rolling-back-p (splice:patch-set-state ps)))
+      (splice:wait-for-state ps '(:rolled-back :frozen) :timeout 30))))
 
 (defun member-prepare (cluster-member spec)
   (handler-case
@@ -526,8 +598,11 @@ Returns MESSAGE's kind"
 is in after 2 minutes"
   (sb-thread:make-thread
    (lambda ()
-     (splice:wait-for-state ps '(:promoted :rolled-back :frozen) :timeout 120)
-     (member-reply cluster-member (list :terminal :state (splice:patch-set-state ps))))
+     (let ((terminal '(:promoted :rolled-back :frozen)))
+       (unless (splice:wait-for-state ps terminal :timeout 120)
+         (member-reply cluster-member (list :stalled :state (splice:patch-set-state ps)))
+         (loop until (splice:wait-for-state ps terminal :timeout 60)))
+       (member-reply cluster-member (list :terminal :state (splice:patch-set-state ps)))))
    :name (format nil "splice-member-watch-~a" (splice:patch-set-name ps))))
 
 (defun member-rollback (cluster-member)
