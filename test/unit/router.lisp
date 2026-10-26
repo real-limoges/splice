@@ -30,7 +30,7 @@
 ;;; The draw
 
 (test draw-is-the-hash-prefix-mod-100
-  (is (= (mod (parse-integer (subseq (sha256-hex "42|SOME-SET") 0 8) :radix 16)
+  (is (= (mod (parse-integer (subseq (splice:sha256-hex "42|SOME-SET") 0 8) :radix 16)
               100)
          (splice::routing-draw 42 'some-set))))
 
@@ -80,9 +80,9 @@
 
 (test task-route-for-reads-the-pin
   (let ((ps (set-in :canary-5)))
-    (is (eq :old (task-route-for ps)))
+    (is (eq :old (splice:task-route-for ps)))
     (let ((splice::*task-epochs* (list (list ps :new))))
-      (is (eq :new (task-route-for ps))))))
+      (is (eq :new (splice:task-route-for ps))))))
 
 (test name-of-tolerates-a-missing-set
   (is (string= "<none>" (splice::name-of nil)))

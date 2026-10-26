@@ -1,12 +1,10 @@
 ;;;; splice.asd: definition file (SBCL only)
 
 (defsystem "splice"
-  :description "Safety net for hot-patching a running SBCL image: coherent
-patch sets, SPRT-gated canary rollout, reversible class migration, and a
-hash-chained log."
+  :description "The splice library. The coherent patch sets, the SPRT-gated canary rollout,
+the reversible class migration, and the hash-chained log. Very specifically loads no SBCL contribs."
   :author "splice project"
   :license "MIT"
-  :depends-on ("sb-introspect" "sb-bsd-sockets")
   :serial t
   :components ((:module "src"
                 :components ((:file "package")
@@ -18,15 +16,33 @@ hash-chained log."
                              (:file "router")
                              (:file "migration")
                              (:file "patch")
-                             (:file "lifecycle")
-                             (:file "harness")
-                             (:file "cluster"))))
+                             (:file "lifecycle"))))
   :in-order-to ((test-op (test-op "splice/tests"))))
 
+(defsystem "splice/cluster"
+  :description "The cluster protocol as values: patch specs, the conductor and
+the member. No transport, so like splice it loads no SBCL contribs."
+  :author "splice project"
+  :license "MIT"
+  :depends-on ("splice")
+  :serial t
+  :components ((:module "src"
+                :components ((:file "cluster-package")
+                             (:file "cluster-protocol"))))
+  :in-order-to ((test-op (test-op "splice/cluster-tests"))))
+
+(defsystem "splice/cluster-tcp"
+  :description "The cluster's TCP transport: sexps over sockets."
+  :author "splice project"
+  :license "MIT"
+  :depends-on ("splice/cluster" "sb-bsd-sockets")
+  :serial t
+  :components ((:module "src"
+                :components ((:file "cluster-tcp")))))
+
 (defsystem "splice/tests"
-  :description "Unit tests. Fast enough to run on every change; the criteria
-run is (asdf:test-system \"splice/criteria\")."
-  :depends-on ("splice" "fiveam")
+  :description "Unit tests. Fast enough to run on every change."
+  :depends-on ("splice" "fiveam" "sb-introspect")
   :serial t
   :components ((:module "test/unit"
                 :components ((:file "package")
@@ -44,12 +60,17 @@ run is (asdf:test-system \"splice/criteria\")."
                                                                  :splice-tests))
                       (error "splice unit tests failed"))))
 
-(defsystem "splice/criteria"
-  :description "Executes every success criterion and writes
-artifacts/criteria-report.md with the measured numbers."
-  :depends-on ("splice")
-  :components ((:module "test" :components ((:file "criteria"))))
+(defsystem "splice/cluster-tests"
+  :description "Unit tests for cluster protocol. Shares the unit suite's
+package and fixtures and runs *no* socket."
+  :depends-on ("splice/tests" "splice/cluster" "fiveam")
+  :serial t
+  :components ((:module "test/unit"
+                :components ((:file "protocol"))))
   :perform (test-op (o c)
                     (declare (ignore o c))
-                    (unless (uiop:symbol-call :splice-criteria :run-criteria)
-                      (error "splice criteria failed; see artifacts/criteria-report.md"))))
+                    (unless (every (lambda (suite)
+                                     (uiop:symbol-call :fiveam :run!
+                                                       (uiop:find-symbol* suite :splice-tests)))
+                                   '(:cluster-protocol))
+                      (error "splice cluster tests failed"))))

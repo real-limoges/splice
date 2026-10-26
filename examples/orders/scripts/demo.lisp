@@ -1,6 +1,6 @@
 ;;;; demo.lisp: splice a patch set in, splice one back out, trace both.
 ;;;;
-;;;;   sbcl --non-interactive --load scripts/demo.lisp
+;;;;   sbcl --non-interactive --load examples/orders/scripts/demo.lisp
 ;;;;
 ;;;; Runs three scenarios in order, each building on the image state the
 ;;;; previous one left behind:
@@ -17,14 +17,15 @@
 ;;;;      detected.
 
 (require :asdf)
-(asdf:load-asd (merge-pathnames "../splice.asd" *load-truename*))
-(asdf:load-system "splice")
+(asdf:load-asd (merge-pathnames "../../../splice.asd" *load-truename*))
+(asdf:load-asd (merge-pathnames "../splice-orders.asd" *load-truename*))
+(asdf:load-system "splice-orders")
 
-(defpackage :splice-demo (:use :cl :splice :splice/harness))
+(defpackage :splice-demo (:use :cl :splice :splice-orders))
 (in-package :splice-demo)
 
 (defvar *log-path* (merge-pathnames "artifacts/demo-audit.log"
-                                    (asdf:system-source-directory "splice")))
+                                    (asdf:system-source-directory "splice-orders")))
 
 (defun headline (fmt &rest args)
   (format t "~%~a~%~a~%" (apply #'format nil fmt args)
@@ -76,7 +77,7 @@
     (format t "post-rollback order total: $~,2f (float world restored; ~
 class has no minor-units slot: ~a)~%"
             (order-float-total o)
-            (not (slot-exists-p o 'splice/harness::amount-minor-units)))))
+            (not (slot-exists-p o 'splice-orders::amount-minor-units)))))
 
 ;;; --------------------------------------------------------------------
 (headline "3. Trace the splices: the audit log is the source of truth")

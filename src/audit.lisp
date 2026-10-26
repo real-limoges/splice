@@ -5,17 +5,20 @@
 
 (in-package #:splice)
 
-(defvar *boot-id*
-  (sha256-hex (format nil "~a-~a-~a" (get-universal-time)
-                      (get-internal-real-time) (machine-instance)))
-  "Identity of this image incarnation, stamped into every log entry.")
-
 (defstruct (audit-log (:constructor %make-audit-log))
   path stream (seq 0) (prev-hash "genesis") (lock (sb-thread:make-mutex))
   ;; bounded in-memory tail, newest first; the file is the source of truth
   (lines '()) (lines-count 0))
 
+(defvar *boot-id*
+  (sha256-hex (format nil "~a-~a-~a" (get-universal-time)
+                      (get-internal-real-time) (machine-instance)))
+  "Identity of this image incarnation, stamped into every log entry.")
+
 (defvar *audit-log* nil "The active audit log, or NIL for none.")
+
+(defconstant +unix-epoch-universal-time+ 2208988800
+  "Universal epoch time (1970-01-01T00:00:00Z)")
 
 (defun open-audit-log (path)
   (let ((stream (open path :direction :output :if-exists :supersede
@@ -26,9 +29,6 @@
   (when *audit-log*
     (close (audit-log-stream *audit-log*))
     (setf *audit-log* nil)))
-
-(defconstant +unix-epoch-universal-time+ 2208988800
-  "Universal epoch time (1970-01-01T00:00:00Z)")
 
 (defun timestamp-string ()
   "UTC wall clock time in ms, ISO 8601 standard"

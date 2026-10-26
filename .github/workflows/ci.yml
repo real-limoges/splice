@@ -11,16 +11,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # apt on 24.04 ships an older SBCL (2.2.x), the version the prototype
-          # was built on. The runner is pinned because ubuntu-latest moving to a
-          # newer release would quietly change which SBCL this job tests.
-          # SBCL 2.2.9 weak hash tables corrupt ("Corrupt NEXT-chain") under GC
-          # pressure and concurrency, even when mutex-guarded. The migration
-          # journal avoids them (strong keys, explicit purging), so a failure
-          # here alone may mean weak tables crept back in.
-          - name: sbcl-2.2-ubuntu-24.04
+          # The supported floor: SBCL's own 2.6.9 binary, checked against its
+          # SHA-256 (the .tar inside matches the release's signed checksum list).
+          # Splice needs 2.6.6 or later, where FDEFINITION returns a trace's
+          # wrapper and SB-EXT:UNENCAPSULATED-FUNCTION unwraps it. apt's SBCL
+          # (2.2.9 on 24.04) is older, so it is not used.
+          - name: sbcl-2.6.9-ubuntu-24.04
             container: ""
-            install: sudo apt-get update && sudo apt-get install -y sbcl
+            install: |
+              cd /tmp
+              curl -fsSLO https://downloads.sourceforge.net/project/sbcl/sbcl/2.6.9/sbcl-2.6.9-x86-64-linux-binary.tar.bz2
+              echo "39fac28407405841003e4c2abfbe0d96abd93b7701e8b61cdd35e713943b46d6  sbcl-2.6.9-x86-64-linux-binary.tar.bz2" | sha256sum -c
+              tar -xjf sbcl-2.6.9-x86-64-linux-binary.tar.bz2
+              cd sbcl-2.6.9-x86-64-linux
+              sudo sh install.sh
           # Arch tracks current SBCL, matching local development. The version
           # floats with Arch; the SBCL version step records which one ran.
           # The container runs as root, so no sudo.
@@ -68,11 +72,29 @@ jobs:
           --eval '(asdf:load-asd (truename "splice.asd"))'
           --eval '(asdf:test-system "splice")'
 
-      # The demo rewrites artifacts/demo-audit.log, which is tracked. That is
-      # harmless in a throwaway checkout, but a step added later that checks for
-      # a clean tree has to run before this one or restore the file.
+      # The cluster protocol's unit tests. They open no socket, so they cover
+      # the protocol but not the TCP transport.
+      - name: Cluster tests
+        run: >
+          sbcl --non-interactive
+          --eval '(require :asdf)'
+          --eval '(asdf:load-asd (truename "splice.asd"))'
+          --eval '(asdf:test-system "splice/cluster")'
+
+      # Loading splice/cluster-tcp checks that the transport compiles, and that
+      # the protocol loads without the orders example.
+      - name: Cluster loads
+        run: >
+          sbcl --non-interactive
+          --eval '(require :asdf)'
+          --eval '(asdf:load-asd (truename "splice.asd"))'
+          --eval '(asdf:load-system "splice/cluster-tcp")'
+
+      # The demo rewrites examples/orders/artifacts/demo-audit.log, which is
+      # tracked. That is harmless in a throwaway checkout, but a step added later
+      # that checks for a clean tree has to run before this one or restore the file.
       - name: Demo
-        run: sbcl --non-interactive --load scripts/demo.lisp
+        run: sbcl --non-interactive --load examples/orders/scripts/demo.lisp
 
       # SPLICE_RUNS=20 is the quick run (about 15 seconds locally); drop it for
       # the full 100 per fault class (about 2 to 4 minutes).
@@ -88,12 +110,13 @@ jobs:
           sbcl --non-interactive
           --eval '(require :asdf)'
           --eval '(asdf:load-asd (truename "splice.asd"))'
-          --eval '(asdf:test-system "splice/criteria")'
+          --eval '(asdf:load-asd (truename "examples/orders/splice-orders.asd"))'
+          --eval '(asdf:test-system "splice-orders/criteria")'
 
       - name: Upload criteria report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: criteria-report-${{ matrix.name }}
-          path: artifacts/criteria-report.md
+          path: examples/orders/artifacts/criteria-report.md
           if-no-files-found: ignore

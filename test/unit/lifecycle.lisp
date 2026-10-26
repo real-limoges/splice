@@ -58,33 +58,33 @@ starting a promotion thread."
 
 (defun join-lifecycle-threads (ps)
   "Wait for PS's rollback and promotion threads, if any are running."
-  (let ((names (list (format nil "splice-rollback-~a" (patch-set-name ps))
-                     (format nil "splice-promote-~a" (patch-set-name ps)))))
+  (let ((names (list (format nil "splice-rollback-~a" (splice:patch-set-name ps))
+                     (format nil "splice-promote-~a" (splice:patch-set-name ps)))))
     (dolist (thread (sb-thread:list-all-threads))
       (when (member (sb-thread:thread-name thread) names :test #'equal)
         (sb-thread:join-thread thread :default nil)))))
 
 (defun roll-back-for-cleanup (ps)
-  (if (eq :frozen (patch-set-state ps))
-      (unfreeze ps :rollback :operator "unit-tests")
-      (roll-back ps :operator "unit-tests"))
-  (wait-for-state ps '(:rolled-back) :timeout 15)
+  (if (eq :frozen (splice:patch-set-state ps))
+      (splice:unfreeze ps :rollback :operator "unit-tests")
+      (splice:roll-back ps :operator "unit-tests"))
+  (splice:wait-for-state ps '(:rolled-back) :timeout 15)
   (join-lifecycle-threads ps))
 
 (defun retire (ps)
   "Restore whatever PS replaced and drop it from the registry."
   (join-lifecycle-threads ps)
   (unless (or (splice::finished-p ps)
-              (eq :registered (patch-set-state ps)))
+              (eq :registered (splice:patch-set-state ps)))
     (roll-back-for-cleanup ps))
-  (unregister-patch-set (patch-set-name ps)))
+  (splice:unregister-patch-set (splice:patch-set-name ps)))
 
 (defmacro with-installed-set ((var form) &body body)
   "Register and install the set FORM makes, bind it to VAR for BODY, and
 retire it whatever happened."
   `(let ((,var ,form))
-     (unwind-protect (progn (register-patch-set ,var)
-                            (install ,var)
+     (unwind-protect (progn (splice:register-patch-set ,var)
+                            (splice:install ,var)
                             ,@body)
        (retire ,var))))
 
@@ -92,7 +92,7 @@ retire it whatever happened."
   "Run probe tasks until DONE-P returns true or LIMIT tasks have run."
   (loop for id from 1 to limit
         until (funcall done-p)
-        do (with-task (:id id :swallow-errors t)
+        do (splice:with-task (:id id :swallow-errors t)
              (funcall 'lifecycle-probe id))))
 
 (defun escaped-error (thunk)
@@ -104,10 +104,10 @@ retire it whatever happened."
   "A handler that records its condition in the cons SEEN and freezes PS."
   (lambda (c)
     (push c (car seen))
-    (freeze ps "operator handler" :operator "unit-tests")))
+    (splice:freeze ps "operator handler" :operator "unit-tests")))
 
 (defun state-trail (ps)
-  (mapcar #'car (patch-set-lifecycle-history ps)))
+  (mapcar #'car (splice:patch-set-lifecycle-history ps)))
 
 ;;; Operator handlers re-entering the lifecycle
 
@@ -116,14 +116,14 @@ retire it whatever happened."
     (let* ((seen (list '()))
            (escaped (escaped-error
                      (lambda ()
-                       (handler-bind ((canary-verdict (freezing-handler ps seen)))
+                       (handler-bind ((splice:canary-verdict (freezing-handler ps seen)))
                          (drive-tasks (lambda () (car seen))))))))
       (is (eq :none escaped) "~a escaped the task" escaped)
       (is (= 1 (length (car seen))))
-      (is (eq :accept (canary-verdict-direction (first (car seen)))))
+      (is (eq :accept (splice:canary-verdict-direction (first (car seen)))))
       (is (search '(:canary-50 :canary-100 :frozen) (state-trail ps))
           "trail was ~s" (state-trail ps))
-      (is (eq :frozen (patch-set-state ps)))
+      (is (eq :frozen (splice:patch-set-state ps)))
       (is (eq :operator (first (splice::patch-set-freeze-reason ps)))))))
 
 (test a-verdict-handler-can-freeze-after-a-reject
@@ -131,47 +131,47 @@ retire it whatever happened."
     (let* ((seen (list '()))
            (escaped (escaped-error
                      (lambda ()
-                       (handler-bind ((canary-verdict (freezing-handler ps seen)))
+                       (handler-bind ((splice:canary-verdict (freezing-handler ps seen)))
                          (drive-tasks (lambda () (car seen))))))))
       (is (eq :none escaped) "~a escaped the task" escaped)
       (is (= 1 (length (car seen))))
-      (is (eq :reject (canary-verdict-direction (first (car seen)))))
+      (is (eq :reject (splice:canary-verdict-direction (first (car seen)))))
       ;; the rollback was decided before the handler ran, and its thread
       ;; gives way to the freeze once the drain ends
       (join-lifecycle-threads ps)
       (is (search '(:canary-100 :rolling-back :frozen) (state-trail ps))
           "trail was ~s" (state-trail ps))
-      (is (eq :frozen (patch-set-state ps))))))
+      (is (eq :frozen (splice:patch-set-state ps))))))
 
 (test a-rollback-handler-can-freeze-an-operator-rollback
   (with-installed-set (ps (healthy-probe-set 'operator-rollback-then-freeze))
     (let* ((seen (list '()))
            (escaped (escaped-error
                      (lambda ()
-                       (handler-bind ((rollback-initiated (freezing-handler ps seen)))
-                         (roll-back ps :operator "unit-tests"))))))
+                       (handler-bind ((splice:rollback-initiated (freezing-handler ps seen)))
+                         (splice:roll-back ps :operator "unit-tests"))))))
       (is (eq :none escaped) "~a escaped roll-back" escaped)
       (is (= 1 (length (car seen))))
-      (is (eq :operator (first (rollback-initiated-trigger (first (car seen))))))
+      (is (eq :operator (first (splice:rollback-initiated-trigger (first (car seen))))))
       (join-lifecycle-threads ps)
       (is (search '(:canary-50 :rolling-back :frozen) (state-trail ps))
           "trail was ~s" (state-trail ps))
-      (is (eq :frozen (patch-set-state ps))))))
+      (is (eq :frozen (splice:patch-set-state ps))))))
 
 (test a-verdict-handler-that-rolls-back-starts-one-rollback
   (with-installed-set (ps (failing-probe-set 'reject-then-roll-back))
     (let* ((returned (list '()))
            (escaped (escaped-error
                      (lambda ()
-                       (handler-bind ((canary-verdict
+                       (handler-bind ((splice:canary-verdict
                                         (lambda (c)
                                           (declare (ignore c))
-                                          (push (roll-back ps :operator "unit-tests")
+                                          (push (splice:roll-back ps :operator "unit-tests")
                                                 (car returned)))))
                          (drive-tasks (lambda () (car returned))))))))
       (is (eq :none escaped) "~a escaped the task" escaped)
       (is (equal '(:no-change) (car returned)))
-      (is (eq :rolled-back (wait-for-state ps '(:rolled-back) :timeout 15)))
+      (is (eq :rolled-back (splice:wait-for-state ps '(:rolled-back) :timeout 15)))
       (join-lifecycle-threads ps)
       (is (= 1 (count :rolling-back (state-trail ps)))
           "trail was ~s" (state-trail ps))
@@ -182,22 +182,22 @@ retire it whatever happened."
   (let ((original (fdefinition 'lifecycle-probe)))
     (unwind-protect
          (with-installed-set (ps (healthy-probe-set 'promote-then-seal))
-           (is (eq :promoting (promote ps :operator "unit-tests")))
-           (is (eq :promoted (wait-for-state ps '(:promoted) :timeout 15)))
+           (is (eq :promoting (splice:promote ps :operator "unit-tests")))
+           (is (eq :promoted (splice:wait-for-state ps '(:promoted) :timeout 15)))
            (join-lifecycle-threads ps)
            (is (equal '(:canary-50 :promoting :swapping :promoted)
                       (last (state-trail ps) 4))
                "trail was ~s" (state-trail ps))
-           (is (eq :sealed (seal-patch ps :operator "unit-tests")))
-           (signals illegal-transition (roll-back ps :operator "unit-tests"))
-           (is (eq :promoted (patch-set-state ps))))
+           (is (eq :sealed (splice:seal-patch ps :operator "unit-tests")))
+           (signals splice:illegal-transition (splice:roll-back ps :operator "unit-tests"))
+           (is (eq :promoted (splice:patch-set-state ps))))
       (setf (fdefinition 'lifecycle-probe) original))))
 
 (test sealing-a-canarying-set-is-refused
   (with-installed-set (ps (healthy-probe-set 'seal-mid-canary))
-    (signals illegal-transition (seal-patch ps :operator "unit-tests"))
+    (signals splice:illegal-transition (splice:seal-patch ps :operator "unit-tests"))
     (is-false (splice::patch-set-sealed ps))
-    (is (eq :canary-50 (patch-set-state ps)))))
+    (is (eq :canary-50 (splice:patch-set-state ps)))))
 
 ;;; Which operator requests each state allows, on bare sets: none of these
 ;;; reach a transition, so nothing needs installing
@@ -208,7 +208,7 @@ retire it whatever happened."
 (defun outcome-of (thunk)
   "THUNK's value, or :REFUSED when it signals ILLEGAL-TRANSITION."
   (handler-case (funcall thunk)
-    (illegal-transition () :refused)))
+    (splice:illegal-transition () :refused)))
 
 (test operator-requests-on-each-state
   (flet ((check (request states expected)
@@ -216,11 +216,11 @@ retire it whatever happened."
              (let ((ps (bare-set state)))
                (is (eq expected (outcome-of (lambda () (funcall request ps))))
                    "~a from ~a" request state)
-               (is (eq state (patch-set-state ps)))))))
-    (let ((freeze-it (lambda (ps) (freeze ps "probe" :operator "unit-tests")))
-          (roll-it-back (lambda (ps) (roll-back ps :operator "unit-tests")))
-          (promote-it (lambda (ps) (promote ps :operator "unit-tests")))
-          (seal-it (lambda (ps) (seal-patch ps :operator "unit-tests"))))
+               (is (eq state (splice:patch-set-state ps)))))))
+    (let ((freeze-it (lambda (ps) (splice:freeze ps "probe" :operator "unit-tests")))
+          (roll-it-back (lambda (ps) (splice:roll-back ps :operator "unit-tests")))
+          (promote-it (lambda (ps) (splice:promote ps :operator "unit-tests")))
+          (seal-it (lambda (ps) (splice:seal-patch ps :operator "unit-tests"))))
       (check freeze-it '(:frozen) :no-change)
       (check freeze-it '(:registered :restoring :swapping :rolled-back :promoted :vetoed)
              :refused)
@@ -237,9 +237,9 @@ retire it whatever happened."
 (test a-rollback-thread-leaves-a-frozen-set-alone
   (let ((ps (bare-set :frozen)))
     (is (eq :abandoned (splice::complete-rollback ps)))
-    (is (eq :frozen (patch-set-state ps)))))
+    (is (eq :frozen (splice:patch-set-state ps)))))
 
 (test a-promotion-thread-leaves-a-frozen-set-alone
   (let ((ps (bare-set :frozen)))
     (is (eq :abandoned (splice::complete-promotion ps)))
-    (is (eq :frozen (patch-set-state ps)))))
+    (is (eq :frozen (splice:patch-set-state ps)))))

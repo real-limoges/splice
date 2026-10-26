@@ -53,13 +53,15 @@
   (last-reversal-report nil)  ; reversal counts from the last rollback
   (sealed nil))               ; journal released; rollback no longer offered
 
+(defvar *patch-sets* (make-hash-table :test #'eq #+sbcl :synchronized #+sbcl t)
+  "Registry of every patch set this image has seen, terminal states included.")
+
+(defvar *deferred-effects*)             ; unbound outside WITH-SET-LOCK, so stray DEFER errors
+
 (defun print-patch-set (ps stream)
   (print-unreadable-object (ps stream :type t)
     (format stream "~a ~a ~a%" (patch-set-name ps) (patch-set-state ps)
             (patch-set-current-fraction ps))))
-
-(defvar *patch-sets* (make-hash-table :test #'eq #+sbcl :synchronized #+sbcl t)
-  "Registry of every patch set this image has seen, terminal states included.")
 
 (defun find-patch-set (name)
   (gethash name *patch-sets*))
@@ -106,8 +108,6 @@ promoting ones (pin :new across the swap) and rolling-back or :frozen ones
                  (push ps out)))
              *patch-sets*)
     out))
-
-(defvar *deferred-effects*)             ; unbound outside WITH-SET-LOCK, so stray DEFER errors
 
 (defun defer (thunk)
   "Run THUNK once the enclosing WITH-SET-LOCK releases"

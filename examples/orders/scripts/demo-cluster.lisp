@@ -1,41 +1,48 @@
 ;;;; demo-cluster.lisp: cluster propagation prototype, exercised against
 ;;;; two real SBCL images.
 ;;;;
-;;;;   sbcl --non-interactive --load scripts/demo-cluster.lisp
+;;;;   sbcl --non-interactive --load examples/orders/scripts/demo-cluster.lisp
 ;;;;
 ;;;; Spawns two member SBCL processes, ships them the currency patch set as
 ;;;; source (two-phase prepare/commit, hash-verified), injects the latent
 ;;;; fault on the member at port 7802 only, and lets the conductor's
 ;;;; pooled-SPRT/local-reject aggregation roll back both members.
+;;;;
+;;;; Does not run yet: the TCP transport's RUN-MEMBER and RUN-CONDUCTOR are
+;;;; not written.
 
 (require :asdf)
-(asdf:load-asd (merge-pathnames "../splice.asd" *load-truename*))
-(asdf:load-system "splice")
-
 (defpackage :splice-cluster-demo (:use :cl))
 (in-package :splice-cluster-demo)
 
-(defvar *root* (namestring (asdf:system-source-directory "splice")))
+(defvar *splice-asd* (merge-pathnames "../../../splice.asd" *load-truename*))
+(defvar *orders-asd* (merge-pathnames "../splice-orders.asd" *load-truename*))
+(asdf:load-asd *splice-asd*)
+(asdf:load-asd *orders-asd*)
+(asdf:load-system "splice-orders/cluster")
 
-(defun spawn-member (port)
+(defun spawn-member (port &optional fault)
   (sb-ext:run-program
    "sbcl"
    (list "--non-interactive"
          "--eval" "(require :asdf)"
-         "--eval" (format nil "(asdf:load-asd \"~asplice.asd\")" *root*)
-         "--eval" "(asdf:load-system \"splice\")"
-         "--eval" (format nil "(splice/cluster:run-member :port ~a)" port))
+         "--eval" (format nil "(asdf:load-asd ~s)" (namestring (truename *splice-asd*)))
+         "--eval" (format nil "(asdf:load-asd ~s)" (namestring (truename *orders-asd*)))
+         "--eval" "(asdf:load-system \"splice-orders/cluster\")"
+         "--eval" (format nil "(splice-orders:run-orders-member :port ~a :fault ~s)"
+                          port fault))
    :search t :wait nil :output nil :error nil))
 
 (format t "~%=== splice cluster demo: 1 conductor, 2 member SBCL images ===~%")
 (format t "spawning members on ports 7801 (healthy) and 7802 (latent fault)...~%")
 
 (let ((m1 (spawn-member 7801))
-      (m2 (spawn-member 7802)))
+      (m2 (spawn-member 7802 :latent)))
   (unwind-protect
        (let ((finals (splice/cluster:run-conductor
+                      (splice-orders:currency-patch-spec)
                       '(("127.0.0.1" 7801)
-                        ("127.0.0.1" 7802 :fault :latent)))))
+                        ("127.0.0.1" 7802)))))
          (format t "~%--- final member reports ---~%")
          (dolist (f finals)
            (format t "  member ~a: state=~a chain-ok=~a reconstruction=~a ~
