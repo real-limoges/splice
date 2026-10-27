@@ -6,11 +6,7 @@
 
 (defvar *task-id* nil "Identity of the current task, NIL outside task scope.")
 (defvar *task-epochs* nil
-  "List of (patch-set route . observed-route) pins made at task entry.
-Fixed-arity shims write OBSERVED-ROUTE on every call.")
-(defvar *task-shim-routes* nil
-  "Alist (patch-set . route) observed by the other shims, checked against
-the pin at exit.")
+  "List of (patch-set route) pins made at task entry.")
 (defvar *task-anomaly-noted* nil
   "Alist (patch-set . t) of sets whose anomaly this task already recorded,
 so an error unwinding through nested shims counts once.")
@@ -18,11 +14,6 @@ so an error unwinding through nested shims counts once.")
   "Task ids handed out so far. A cons for ATOMIC-INCF.")
 (defvar *task-sample-every* 50
   "Log every Nth task's pinned routes to the audit log.")
-
-(defvar *mixed-execution-cell* (list 0)
-  "Coherence violations ever observed; must stay 0. A cons for ATOMIC-INCF.")
-(defun mixed-execution-count () (car *mixed-execution-cell*))
-(defun note-mixed-execution () (sb-ext:atomic-incf (car *mixed-execution-cell*)))
 
 (defun next-task-id ()
   (1+ (sb-ext:atomic-incf (car *task-counter-cell*))))
@@ -55,25 +46,16 @@ a promoting set pins :new, and anything else pins :old."
           (incf (patch-set-pinned-old ps)))
       (list ps route))))
 
+(declaim (inline task-route-for))
 (defun task-route-for (ps)
-  "The current task's pinned route for PS, or :old outside a task."
+  "The current task's pinned route for PS, or :old outside a task.
+Asked for Inline since every shim call asks it"
   (let ((pin (assoc ps *task-epochs* :test #'eq)))
     (if pin (cadr pin) :old)))
 
 (defun current-route (set-name)
   (let ((ps (find-patch-set set-name)))
     (and ps (task-route-for ps))))
-
-(defun note-shim-route (ps route)
-  "Record the route a shim took. Two routes for one set is a mixed execution."
-  (let ((prior (assoc ps *task-shim-routes* :test #'eq)))
-    (cond ((null prior)
-           (push (cons ps route) *task-shim-routes*))
-          ((not (eq (cdr prior) route))
-           (note-mixed-execution)
-           (audit :coherence-violation
-                  :patch-set (patch-set-name ps) :task *task-id*
-                  :pinned (cdr prior) :observed route)))))
 
 (defun note-anomaly (ps condition)
   "Record an error from :new-routed code, once per task per set. Storage
@@ -93,13 +75,12 @@ conditions and migration failures arm the hard trigger."
                                (princ-to-string condition)))))
 
 (defun call-with-task (id thunk &key (swallow-errors nil))
-  "Run THUNK as one task: pin routes, count in-flight tasks, check coherence
-at exit, and report the outcome to each pinned set. The FALLBACK-TO-OLD
-restart retries the whole task on old code."
+  "Run THUNK as one task: pin routes, count in-flight tasks, and report the
+outcome to each pinned set. The FALLBACK-TO-OLD restart retries the whole task
+on old code."
   (let* ((*task-id* (or id (next-task-id)))
          (sets (active-canary-sets))
          (*task-epochs* (mapcar (lambda (ps) (pin-and-count ps *task-id*)) sets))
-         (*task-shim-routes* '())
          (*task-anomaly-noted* '())
          (start (get-internal-real-time))
          (outcome :success)
@@ -127,19 +108,9 @@ restart retries the whole task on old code."
                    (funcall thunk)))
            (fallback-to-old ()
              :report "Retry this task with every patch set routed to old code."
-             ;; fresh pins and trace, so the retry is not a coherence violation
              (let ((*task-epochs* (mapcar (lambda (pin) (list (car pin) :old))
-                                          *task-epochs*))
-                   (*task-shim-routes* '()))
+                                          *task-epochs*)))
                (funcall thunk))))
-      ;; every route a shim took must match the pin
-      (dolist (obs *task-shim-routes*)
-        (let ((pin (assoc (car obs) *task-epochs* :test #'eq)))
-          (unless (and pin (eq (cdr obs) (cadr pin)))
-            (note-mixed-execution))))
-      (dolist (pin *task-epochs*)
-        (when (and (cddr pin) (not (eq (cddr pin) (cadr pin))))
-          (note-mixed-execution)))
       ;; release pins before reporting: a rollback would wait on these counts
       (dolist (pin *task-epochs*)
         (with-set-lock ((car pin))

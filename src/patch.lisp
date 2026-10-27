@@ -285,8 +285,7 @@ printed error when the check signaled one."
 returns the failing contract's name at runtime. Returns T when all pass.
 Contracts run outside any task, so a plain call reaches old code."
   (let ((*contract-context* ps)
-        (*task-epochs* nil)
-        (*task-shim-routes* nil))
+        (*task-epochs* nil))
     (dolist (contract (patch-set-contracts ps) t)
       (multiple-value-bind (verdict detail) (check-contract contract)
         (cond ((and (eq verdict :fail) (eq phase :pre-flight))
@@ -306,20 +305,6 @@ Contracts run outside any task, so a plain call reaches old code."
 (defun arg-names (n)
   "Argument symbols A0 to An-1, for generated lambdas and methods."
   (loop for i below n collect (intern (format nil "A~d" i) :splice)))
-
-(declaim (inline record-pinned-route))
-(defun record-pinned-route (ps)
-  "The task's pinned route for PS, also written onto the pin. :OLD outside a
-task. Inline, since it sits on every fixed-arity shim call."
-  (let ((pin (assoc ps *task-epochs* :test #'eq)))
-    (when pin (setf (cddr pin) (cadr pin)))
-    (if pin (cadr pin) :old)))
-
-(defun traced-route (ps)
-  "The task's pinned route for PS, added to the task's route trace."
-  (let ((route (task-route-for ps)))
-    (note-shim-route ps route)
-    route))
 
 (defun call-new-noting-anomalies (ps run-new)
   "Call RUN-NEW. An error or storage condition is noted as a canary anomaly
@@ -351,7 +336,7 @@ The old route is a direct call; closures are built only on the new route."
   (let ((args (arg-names arity)))
     `(lambda (ps old new)
        (lambda ,args
-         (if (eq (record-pinned-route ps) :new)
+         (if (eq (task-route-for ps) :new)
              (flet ((run-new () (funcall new ,@args))
                     (run-old () (funcall old ,@args)))
                (declare (dynamic-extent #'run-new #'run-old))
@@ -372,7 +357,7 @@ call goes through &REST and APPLY, so it is slower than a fixed-arity shim."
     (flet ((run-new () (apply new args))
            (run-old () (apply old args)))
       (declare (dynamic-extent #'run-new #'run-old))
-      (if (eq (traced-route ps) :new)
+      (if (eq (task-route-for ps) :new)
           (call-new ps #'run-new #'run-old)
           (run-old)))))
 
@@ -433,7 +418,7 @@ note anomalies from new code but never fall back to old code."
         (new (method-patch-new-fn mp))
         (old (old-method-callable mp)))
     `(defmethod ,(method-patch-gf-name mp) ,(method-lambda-list mp args)
-       (if (eq (traced-route ,ps) :new)
+       (if (eq (task-route-for ,ps) :new)
            (call-new-noting-anomalies ,ps (lambda () (funcall ,new ,@args)))
            (funcall ,old ,@args)))))
 

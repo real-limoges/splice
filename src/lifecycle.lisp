@@ -5,8 +5,8 @@
 (in-package #:splice)
 
 (defvar *drain-timeout-seconds* 10
-  "How long to wait for pinned tasks before rollback freezes or promotion
-proceeds anyway.")
+  "How long rollback and promotion wait for pinned tasks to drain. Either one
+freezes the set when the wait runs out.")
 
 (defun transition (ps to &rest fields)
   "Move PS to state TO, record history, and audit. Caller holds the lock."
@@ -292,18 +292,18 @@ in :restoring, which an operator cannot move the set out of."
                                                          (patch-set-name ps))))))
 
 (defun complete-promotion (ps)
-  "Quiescence check, then claim the set and swap in the new world. A set
-that left :promoting during the drain is left alone. Returns :promoted or
-:abandoned."
-  (let ((drained (wait-for-drain (lambda () (patch-set-pinned-old ps))
-                                 *drain-timeout-seconds*)))
-    ;; undrained tasks are only noted: old code stays valid up to the swap
-    (unless drained
-      (audit :promotion-quiescence :patch-set (patch-set-name ps)
-                                   :unswitched-old-pinned (patch-set-pinned-old ps)))
-    (if (eq :claimed (claim-transition ps :promoting :swapping))
-        (swap-in-new-world ps)
-        :abandoned)))
+  "Drain :old-pinned tasks, then claim the set and swap in the new world. Drain that times
+out freezes th set, so no :old task ever runs new code. Sets that leave :promoting
+during the drain are left alone. Returns :promoted, :frozen, or :abandoned"
+  (cond ((not (wait-for-drain (lambda () (patch-set-pinned-old ps))
+                              *drain-timeout-seconds*))
+         (freeze-from ps :promoting
+                      (list :promotion-drain-timeout
+                            :old-pinned (patch-set-pinned-old ps)
+                            :timeout-seconds *drain-timeout-seconds*)))
+        ((eq :claimed (claim-transition ps :promoting :swapping))
+         (swap-in-new-world ps))
+        (t :abandoned)))
 
 (defun swap-in-new-world (ps)
   "The destructive install of the new world. Runs in :swapping, which an

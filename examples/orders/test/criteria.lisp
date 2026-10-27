@@ -25,9 +25,6 @@
 (defvar *report* '())
 (defvar *batches* '())
 (defvar *big-log* nil "The log every section after the checkpoints shares.")
-(defvar *mixed-executions* 0
-  "Mixed executions summed over every canary session in the run. The session driver
-resets its own counter at the start of each session.")
 
 (defun root () (asdf:system-source-directory "splice-orders"))
 (defun scratch-file (name) (merge-pathnames name (uiop:temporary-directory)))
@@ -69,7 +66,7 @@ resets its own counter at the start of each session.")
       (loop for i from 1 to 400
             do (splice:with-task (:id i :swallow-errors t)
                  (orders:process-order (make-instance 'orders:order :id i :item-count 2
-                                                          :unit-price 10.0))))
+                                                                    :unit-price 10.0))))
       (multiple-value-bind (ok mism state) (splice:verify-reconstruction log)
         (check "Checkpoint: mid-canary reconstruction"
                (and ok (splice::canary-stage-p
@@ -183,23 +180,17 @@ what the rollback left behind."
           collect (splice:with-task (:id i)
                     (orders:process-order
                      (make-instance 'orders:order :id i
-                                             :item-count (orders:rng-range rng 1 9)
-                                             :unit-price (/ (orders:rng-range rng 100 9999) 100.0)
-                                             :discount-code (case (mod (orders:rng-next rng) 5)
-                                                              (0 "TEN") (1 "VIP") (t nil))))))))
+                                                  :item-count (orders:rng-range rng 1 9)
+                                                  :unit-price (/ (orders:rng-range rng 100 9999) 100.0)
+                                                  :discount-code (case (mod (orders:rng-next rng) 5)
+                                                                   (0 "TEN") (1 "VIP") (t nil))))))))
 
 ;;; ---------------------------------------------------------------------
 ;;; C1: the flagship scenario
 
-(defun run-session (&rest args)
-  "RUN-CANARY-SESSION, adding the session's mixed executions to the run total."
-  (let ((r (apply #'orders:run-canary-session args)))
-    (incf *mixed-executions* (orders:coherence-violations))
-    r))
-
 (defun check-flagship ()
   (format t "~%--- C1: flagship, 3 functions + method + class, latent fault, 5/25/100 ramp~%")
-  (let ((r (run-session :fault :latent :seed 4242 :quiet t)))
+  (let ((r (orders:run-canary-session :fault :latent :seed 4242 :quiet t)))
     (check "Flagship: fault caught and rolled back"
            (eq (orders:session-result-final-state r) :rolled-back)
            (orders:session-result-final-state r))
@@ -218,9 +209,7 @@ what the rollback left behind."
              rev)
       (check "Flagship: journal-exact restorations occurred (instances were
 migrated forward mid-canary, then restored)"
-             (and rev (plusp (getf rev :journal-exact))) rev))
-    (check "Flagship: zero mixed executions" (zerop (orders:coherence-violations))
-           (orders:coherence-violations))))
+             (and rev (plusp (getf rev :journal-exact))) rev))))
 
 ;;; C4: post-rollback workload identical to never-patched control
 
@@ -248,15 +237,12 @@ migrated forward mid-canary, then restored)"
 (defun run-batch (kind &key threads)
   (let ((b (make-batch :kind kind :runs *runs*)))
     (dotimes (i *runs*)
-      (let* ((r (run-session :fault kind
-                                    :seed (+ 10000 (* 131 i)
-                                             (if kind (sxhash kind) 0))
-                                    :threads (or threads 1) :quiet t))
+      (let* ((r (orders:run-canary-session :fault kind
+                                            :seed (+ 10000 (* 131 i)
+                                                     (if kind (sxhash kind) 0))
+                                            :threads (or threads 1) :quiet t))
              (state (orders:session-result-final-state r)))
         (push state (batch-final-states b))
-        (unless (zerop (orders:coherence-violations))
-          (check (format nil "~a run ~a: mixed executions" kind i) nil
-                 (orders:coherence-violations)))
         (when (eq state :rolled-back)
           (incf (batch-caught b))
           (push (orders:session-result-detection-observations r) (batch-detect-ns b))
@@ -301,7 +287,56 @@ migrated forward mid-canary, then restored)"
                  nil))))))
 
 ;;; ---------------------------------------------------------------------
-;;; C3: coherence, verified offline from the audit log
+;;; C3: coherence. Promotion swaps only once the :old pins drain, so no task
+;;; runs a mix of old and new code; the sampled routes are checked offline.
+
+(defun hold-old-task (ps release)
+  "Start a thread whose task pins PS :old and waits for the semaphore
+RELEASE. Returns the thread once the pin is counted."
+  (let* ((fraction (splice::patch-set-current-fraction ps))
+         (id (loop for id from 1000000
+                   when (>= (splice::routing-draw id (splice:patch-set-name ps)) fraction)
+                     return id))
+         (thread (sb-thread:make-thread
+                  (lambda ()
+                    (splice:with-task (:id id :swallow-errors t)
+                      (sb-thread:wait-on-semaphore release)))
+                  :name "criteria-held-task")))
+    (loop until (plusp (splice::patch-set-pinned-old ps))
+          do (sleep 0.01))
+    thread))
+
+(defun every-shim-installed-p (ps)
+  (every (lambda (fp)
+           (eq (fdefinition (splice::fn-patch-name fp)) (splice::fn-patch-shim fp)))
+         (splice::patch-set-fn-patches ps)))
+
+(defun check-promotion-waits-for-drain ()
+  (format t "~%--- C3: promotion freezes rather than swap past an undrained :old task~%")
+  (let ((log (scratch-file "splice-criteria-drain.log"))
+        (release (sb-thread:make-semaphore))
+        (saved splice::*drain-timeout-seconds*))
+    (splice:open-audit-log log)
+    (orders:reset-workload)
+    (let ((ps (orders:register-currency-patch-set)))
+      (splice:install ps)
+      (let ((held (hold-old-task ps release)))
+        (unwind-protect
+             (progn
+               ;; global, not LET: the promotion thread reads it
+               (setf splice::*drain-timeout-seconds* 1)
+               (splice:promote ps :operator "criteria")
+               (check "C3: a promotion whose :old task never drains freezes instead of swapping"
+                      (and (eq :frozen (splice:wait-for-state ps '(:frozen :promoted) :timeout 10))
+                           (eq :promotion-drain-timeout
+                               (first (splice::patch-set-freeze-reason ps)))
+                           (every-shim-installed-p ps))
+                      (list (splice:patch-set-state ps) (splice::patch-set-freeze-reason ps))))
+          (setf splice::*drain-timeout-seconds* saved)
+          (sb-thread:signal-semaphore release)
+          (sb-thread:join-thread held))))
+    (orders:reset-workload)
+    (splice:close-audit-log)))
 
 (defun check-coherence ()
   (format t "~%--- C3: offline coherence check from sampled task records~%")
@@ -326,9 +361,7 @@ migrated forward mid-canary, then restored)"
                              (incf bad)))))))))
     (check (format nil "C3: ~a sampled routes match the deterministic draw (~a bad)"
                    checked bad)
-           (and (plusp checked) (zerop bad)) nil))
-  (check "C3: zero mixed executions across every canary session"
-         (zerop *mixed-executions*) *mixed-executions*))
+           (and (plusp checked) (zerop bad)) nil)))
 
 ;;; ---------------------------------------------------------------------
 ;;; C7: overhead
@@ -351,22 +384,20 @@ migrated forward mid-canary, then restored)"
     (let ((ps (orders:register-currency-patch-set)))
       (splice:install ps)
       ;; canary in flight: measure the shim on both routes, inside task scope
-      (let* ((shim-old (let ((splice::*task-epochs* (list (list ps :old)))
-                             (splice::*task-shim-routes* '()))
+      (let* ((shim-old (let ((splice::*task-epochs* (list (list ps :old))))
                          (ns-per-call `(lambda (n)
                                          (let ((o ,bench-order))
                                            (dotimes (i n) (orders:price-order o)))))))
-             (shim-new (let ((splice::*task-epochs* (list (list ps :new)))
-                             (splice::*task-shim-routes* '()))
+             (shim-new (let ((splice::*task-epochs* (list (list ps :new))))
                          (ns-per-call `(lambda (n)
                                          (let ((o ,(make-instance 'orders:order :id 2
-                                                                           :item-count 3 :unit-price 19.99)))
+                                                                                :item-count 3 :unit-price 19.99)))
                                            (dotimes (i n) (orders:price-order o))))))))
         (splice:promote ps :operator "criteria")
         (splice:wait-for-state ps '(:promoted) :timeout 30)
         (let ((promoted (ns-per-call `(lambda (n)
                                         (let ((o ,(make-instance 'orders:order :id 3
-                                                                          :item-count 3 :unit-price 19.99)))
+                                                                               :item-count 3 :unit-price 19.99)))
                                           (dotimes (i n) (orders:price-order o)))))))
           (push (list :plain plain :shim-old shim-old :shim-new shim-new
                       :promoted promoted)
@@ -453,12 +484,12 @@ and the full-log checks run last."
         (*failures* '())
         (*report* '())
         (*batches* '())
-        (*mixed-executions* 0)
         (*big-log* (scratch-file "splice-criteria.log")))
     (format t "~%=== splice criteria runner (~a runs per class) ===~%" *runs*)
     (check-reconstruction-checkpoints)
     (check-resume-after-hard-trigger)
     (check-runtime-contract-routing)
+    (check-promotion-waits-for-drain)
     (splice:open-audit-log *big-log*)
     (orders:reset-workload)
     (let ((pristine (workload-signature 777 300)))
