@@ -42,8 +42,6 @@
           (session-result-final-state r) (session-result-tasks-run r))
   (format t "lifecycle:   ~{~a~^ -> ~}~%"
           (mapcar #'car (session-result-transitions r)))
-  (format t "mixed executions (must be 0): ~a~%"
-          (coherence-violations))
   ;; the patched world is live: order math is exact minor units now
   (let ((o (make-instance 'order :id 9999 :item-count 3 :unit-price 19.99
                                  :discount-code "TEN")))
@@ -65,9 +63,7 @@
           (session-result-detection-observations r))
   (format t "reverse migration: ~a~%" (session-result-reversal-report r))
   (format t "rollback exactness: ~a~%"
-          (session-result-post-rollback-comparison r))
-  (format t "mixed executions (must be 0): ~a~%"
-          (coherence-violations)))
+          (session-result-post-rollback-comparison r)))
 
 ;; show that old behavior is genuinely back
 (let ((o (make-instance 'order :id 10000 :item-count 3 :unit-price 19.99

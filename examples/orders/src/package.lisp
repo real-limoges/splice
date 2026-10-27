@@ -25,5 +25,4 @@
    #:session-result-tasks-run
    #:session-result-detection-observations #:session-result-veto-p
    #:session-result-reversal-report #:session-result-pre-existing-snapshot
-   #:session-result-post-rollback-comparison #:session-result-wallclock-ms
-   #:coherence-violations #:reset-coherence-tracking))
+   #:session-result-post-rollback-comparison #:session-result-wallclock-ms))

@@ -54,17 +54,17 @@ sending the conductor CLUSTER-MEMBER's health every 200 tasks"
                                :name "member-workload")))
 
 (defmethod splice/cluster:final-report-fields ((workload orders-workload) ps)
-  "Stop the workload and report its mixed-execution count"
+  "Stop the workload; it adds no fields of its own"
   (declare (ignore ps))
   (setf (orders-workload-stopping workload) t)
   (let ((worker (orders-workload-worker workload)))
     (when worker
       (ignore-errors (sb-thread:join-thread worker))))
-  (list :mixed (coherence-violations)))
+  '())
 
 (defun run-orders-member (&key (port 7801)
-                               (log-path (format nil "/tmp/splice-member-~a.log" port))
-                               fault)
+                            (log-path (format nil "/tmp/splice-member-~a.log" port))
+                            fault)
   "Serve cluster on loopback PORT, driving the orders workload once committed.
 FAULT (a fault kind) is injected into this member only."
   (splice/cluster:run-member

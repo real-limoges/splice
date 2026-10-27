@@ -45,11 +45,9 @@
                         ("127.0.0.1" 7802)))))
          (format t "~%--- final member reports ---~%")
          (dolist (f finals)
-           (format t "  member ~a: state=~a chain-ok=~a reconstruction=~a ~
-mixed=~a~%             reversal=~a~%"
+           (format t "  member ~a: state=~a chain-ok=~a reconstruction=~a~%             reversal=~a~%"
                    (getf f :port) (getf f :state) (getf f :chain-ok)
-                   (getf f :reconstruction-ok) (getf f :mixed)
-                   (getf f :reversal)))
+                   (getf f :reconstruction-ok) (getf f :reversal)))
          (format t "~%verdict:~%")
          (format t "  both members rolled back:  ~a~%"
                  (every (lambda (f) (eq (getf f :state) :rolled-back)) finals))
@@ -57,9 +55,6 @@ mixed=~a~%             reversal=~a~%"
                  (every (lambda (f) (getf f :chain-ok)) finals))
          (format t "  both reconstructions ok:   ~a~%"
                  (every (lambda (f) (getf f :reconstruction-ok)) finals))
-         (format t "  zero mixed executions:     ~a~%"
-                 (every (lambda (f) (and (getf f :mixed) (zerop (getf f :mixed))))
-                        finals))
          (multiple-value-bind (ok entry-count)
              (splice:verify-audit-chain "/tmp/splice-conductor.log")
            (format t "  conductor log intact:      ~a (~a entries)~%"

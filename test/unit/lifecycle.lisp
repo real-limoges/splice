@@ -202,8 +202,8 @@ retire it whatever happened."
 ;;; Which operator requests each state allows, on bare sets: none of these
 ;;; reach a transition, so nothing needs installing
 
-(defun bare-set (state)
-  (splice::make-patch-set :name 'bare :state state))
+(defun bare-set (state &rest initargs)
+  (apply #'splice::make-patch-set :name 'bare :state state initargs))
 
 (defun outcome-of (thunk)
   "THUNK's value, or :REFUSED when it signals ILLEGAL-TRANSITION."
@@ -243,3 +243,19 @@ retire it whatever happened."
   (let ((ps (bare-set :frozen)))
     (is (eq :abandoned (splice::complete-promotion ps)))
     (is (eq :frozen (splice:patch-set-state ps)))))
+
+;;; Promotion swaps only after the :old pins drain (decision 0008). A bare
+;;; set has no shims, so these exercise the drain and the claim alone.
+
+(test a-drain-timeout-freezes-instead-of-swapping
+  (let ((ps (bare-set :promoting :pinned-old 1))
+        (splice::*drain-timeout-seconds* 0.05))
+    (is (eq :frozen (splice::complete-promotion ps)))
+    (is (eq :frozen (splice:patch-set-state ps)))
+    (is (eq :promotion-drain-timeout (first (splice::patch-set-freeze-reason ps))))
+    (is (equal '(:frozen) (state-trail ps)) "trail was ~s" (state-trail ps))))
+
+(test a-drain-that-completes-swaps
+  (let ((ps (bare-set :promoting)))
+    (is (eq :promoted (splice::complete-promotion ps)))
+    (is (equal '(:swapping :promoted) (state-trail ps)) "trail was ~s" (state-trail ps))))

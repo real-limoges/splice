@@ -1,6 +1,6 @@
 ;;;; session.lisp: the session driver. Runs the flagship patch set through
 ;;;; one canary lifecycle under synthetic load and collects the evidence:
-;;;; detection, rollback exactness, and mixed executions.
+;;;; detection, and rollback exactness.
 
 (in-package #:splice-orders)
 
@@ -74,7 +74,6 @@ restore. CORRUPTED orders fail forward migration under :migration."
   "Run one patch lifecycle under synthetic load; return a SESSION-RESULT.
 Expects an open audit log."
   (reset-workload)
-  (reset-coherence-tracking)
   (let* ((rng (make-rng seed))
          (*fault-rng* (make-rng (+ seed 7)))
          (*fault* (when fault (make-fault :kind fault)))
@@ -197,10 +196,6 @@ is original, and pre-existing orders match their pre-patch snapshot."
           :class-shape-original shape-ok
           :snapshot-restored restored
           :snapshot-total (length orders))))
-
-(defun coherence-violations () (splice::mixed-execution-count))
-(defun reset-coherence-tracking ()
-  (setf (car splice::*mixed-execution-cell*) 0))
 
 (defun run-workload (&key (tasks 500) (seed 1))
   "Plain workload with no patch in flight (baseline / overhead measurement)."
