@@ -43,8 +43,8 @@ recordings/act-2-seed-2002-20261028T170211.sexp in placed in the example's tree.
       (string-trim `(#\Newline #\Space)
                    (uiop:run-program (list "git" "-C" (namestring (asdf:system-source-directory "splice"))
                                            "describe" "--always" "--dirty" "--abbrev=7")
-                                     :output :string)))
-  (error () "unknown"))
+                                     :output :string))
+    (error () "unknown")))
 
 ;;; TODO - Rework this. I really hate a lot of this
 (defun recording-header (act settings)

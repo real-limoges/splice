@@ -33,6 +33,19 @@ artifacts/criteria-report.md with the measured numbers."
                     (unless (uiop:symbol-call :splice-orders/criteria :run-criteria)
                       (error "splice criteria failed; see artifacts/criteria-report.md"))))
 
+(defsystem "splice-orders/demo-probe"
+  :description "Layout probe, only needs splice-orders and fiveam.
+Runs before and demo code exists"
+  :depends-on ("splice-orders" "fiveam")
+  :components ((:module "test/demo"
+                :components ((:file "probe"))))
+  :perform (test-op (o c)
+                    (declare (ignore o c))
+                    (unless (uiop:symbol-call :fiveam :run!
+                                              (uiop:find-symbol* :demo-probe
+                                                                 :splice-orders/demo-probe))
+                      (error "the layout probe failed"))))
+
 (defsystem "splice-orders/demo"
   :description "The live-image demo: snapshots, the sampler, renderers, the
 presenter gate, recording and the act driver. Everything testable without a browser."
@@ -40,4 +53,17 @@ presenter gate, recording and the act driver. Everything testable without a brow
   :serial t
   :components ((:module "src/demo"
                 :components ((:file "package")
-                             (:file "record")))))
+                             (:file "record"))))
+  :in-order-to ((test-op (test-op "splice-orders/demo-tests"))))
+
+(defsystem "splice-orders/demo-tests"
+  :description "Demo tests. Runs without CLOG installed."
+  :depends-on ("splice-orders/demo" "fiveam")
+  :serial t
+  :components ((:module "test/demo"
+                :components ((:file "package"))))
+  :perform (test-op (o c)
+                    (declare (ignore o c))
+                    (unless (uiop:symbol-call :fiveam :run!
+                                              (uiop:find-symbol* :demo :splice-orders/demo-tests))
+                      (error "splice demo tests failed"))))
