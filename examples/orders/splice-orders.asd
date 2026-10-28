@@ -53,7 +53,13 @@ presenter gate, recording and the act driver. Everything testable without a brow
   :serial t
   :components ((:module "src/demo"
                 :components ((:file "package")
-                             (:file "record"))))
+                             (:file "snapshot")
+                             (:file "sampler")
+                             (:file "render")
+                             (:file "gate")
+                             (:file "chain")
+                             (:file "record")
+                             (:file "driver"))))
   :in-order-to ((test-op (test-op "splice-orders/demo-tests"))))
 
 (defsystem "splice-orders/demo-tests"
@@ -61,9 +67,34 @@ presenter gate, recording and the act driver. Everything testable without a brow
   :depends-on ("splice-orders/demo" "fiveam")
   :serial t
   :components ((:module "test/demo"
-                :components ((:file "package"))))
+                :components ((:file "package")
+                             (:file "snapshot")
+                             (:file "sampler")
+                             (:file "render")
+                             (:file "gate")
+                             (:file "record")
+                             (:file "driver"))))
   :perform (test-op (o c)
                     (declare (ignore o c))
                     (unless (uiop:symbol-call :fiveam :run!
                                               (uiop:find-symbol* :demo :splice-orders/demo-tests))
                       (error "splice demo tests failed"))))
+
+(defsystem "splice-orders/demo-clog"
+  :description "The one file that talks to CLOG"
+  :depends-on ("splice-orders/demo" "clog")
+  :components ((:module "src/demo"
+                :components ((:file "view"))))
+  :in-order-to ((test-op (test-op "splice-orders/demo-clog-tests"))))
+
+(defsystem "splice-orders/demo-clog-tests"
+  :description "Smoke test for CLOG. Opt-in"
+  :depends-on ("splice-orders/demo-clog" "splice-orders/demo-tests" "sb-bsd-sockets")
+  :components ((:module "test/demo"
+                :components ((:file "smoke"))))
+  :perform (test-op (o c)
+                    (declare (ignore o c))
+                    (unless (uiop:symbol-call :fiveam :run!
+                                              (uiop:find-symbol* :demo-smoke
+                                                                 :splice-orders/demo-tests))
+                      (error "splice demo smoke test failed"))))
