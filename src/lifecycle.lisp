@@ -8,6 +8,22 @@
   "How long rollback and promotion wait for pinned tasks to drain. Either one
 freezes the set when the wait runs out.")
 
+(defvar *audit-sprt-steps* nil
+  "When true, audit every canary observations SPRT state as :SPRT-STEP
+This is off by default, a long criteria would log every observation")
+
+(defun sprt-point (sprt)
+  "SPRT's position as (n . llr). llr is a single float like SPRT-SNAPSHOT"
+  (cons (sprt-n sprt) (float (sprt-llr sprt) 1.0)))
+
+(defun audit-sprt-step (ps err-sprt lat-sprt)
+  "Audit a canary observation's SPRT positions when *AUDIT-SPRT-STEPS* is on"
+  (when *audit-sprt-steps*
+    (audit :sprt-step :patch-set (patch-set-name ps)
+                      :stage (patch-set-stage-index ps)
+                      :errors (sprt-point err-sprt)
+                      :slow (sprt-point lat-sprt))))
+
 (defun transition (ps to &rest fields)
   "Move PS to state TO, record history, and audit. Caller holds the lock."
   (let ((from (patch-set-state ps)))
@@ -136,6 +152,7 @@ transition. Returns the action taken: :continue when nothing changed, else
                                         (> latency-ms
                                            (max (* 1.5 p95) (+ p95 0.5))))
                           :continue)))
+    (audit-sprt-step ps err-sprt lat-sprt)
     ;; sample runtime contracts: structural breakage is not a rate question
     (when (and (plusp (patch-set-runtime-contract-interval ps))
                (zerop (mod (sprt-n err-sprt)

@@ -14,10 +14,76 @@
   "Every thread-name prefix the example uses, so a viewer can tell its
 threads from the rest. orders-straggler is reserved for a held :old task.")
 
+(defstruct pacer
+  (pace nil :read-only t)
+  (lock (sb-thread:make-mutex :name "orders-pace") :read-only t)
+  ;; mutable
+  (last-paced nil)
+  (paused-at :none))
+
+(defstruct live-session
+  (patch-set nil :read-only t)
+  (orders nil :read-only t)
+  (seed nil :read-only t)
+  (fault nil :read-only t)
+  (threads nil :read-only t)
+  (started nil :read-only t)
+  (audit-start-seq nil :read-only t)
+  (pacer nil :read-only t))
+
+(defvar *live-session* nil
+  "The session RUN-CANARY-SESSION is running or last ran (for other threasd)
+NIL from the start of a session until its install succeeds")
+
 (defstruct session-result
   final-state transitions tasks-run veto-p
   detection-observations reversal-report pre-existing-snapshot
   post-rollback-comparison wallclock-ms)
+
+;;; Hooks for observers (live session, pacing, held :old task)
+
+(defun publish-session (&rest initargs)
+  "Make a LIVE-SESSION from INITARGS and publish it to every thread"
+  (setf *live-session* (apply #'make-live-session initargs)))
+
+(defun await-pace (pacer ps)
+  "Hold this worker while the presenter holds a new stage.
+Returns :passed or :paced"
+  (cond ((null (pacer-pace pacer)) :passed)
+        ((eql (splice::patch-set-stage-index ps) (pacer-last-paced pacer)) :passed)
+        (t (sb-thread:with-mutex ((pacer-lock pacer))
+             (pace-stage pacer (splice::patch-set-stage-index ps))))))
+
+(defun pace-stage (pacer stage)
+  "Pace STAGE unless another work already did this while this one waited"
+  (if (eql stage (pacer-last-paced pacer))
+      :passed
+      (progn (setf (pacer-paused-at pacer) stage)
+             (unwind-protect (funcall (pacer-pace pacer) stage)
+               (setf (pacer-paused-at pacer) :none))
+             (setf (pacer-last-paced pacer) stage)
+             :paced)))
+
+(defun live-session-paused-at (session)
+  "Stage index SESSION's presenter is holding or :NONE"
+  (pacer-paused-at (live-session-pacer session)))
+
+(defun old-pinned-task-id (set-name &key (from 1000000))
+  "First task id from FROM whose routing draws pins :old at every stage below 100"
+  (loop for id from from
+        when (= 99 (splice::routing-draw id set-name))
+          return id))
+
+(defun start-held-task (ps hold)
+  "Start a task pinned :old on PS that calls HOLD. It blocks before it does
+its work. PS must be in the canary stage below 100. Returns the thread"
+  (let ((id (old-pinned-task-id (splice:patch-set-name ps))))
+    (sb-thread:make-thread
+     (lambda ()
+       (splice:with-task (:id id :swallow-errors t)
+         (funcall hold)
+         (process-order (make-test-order))))
+     :name "orders-straggler")))
 
 ;;; ---------------------------------------------------------------------
 ;;; Session driver
@@ -70,9 +136,14 @@ restore. CORRUPTED orders fail forward migration under :migration."
                              (min-n 50) (max-n 2000)
                              (pre-existing 40) (threads 1)
                              (touch-pre-existing-every 11)
-                             paired-fallback quiet)
+                             paired-fallback quiet
+                             pace (settle-timeout 30))
   "Run one patch lifecycle under synthetic load; return a SESSION-RESULT.
-Expects an open audit log."
+Expects an open audit log. PACE, when given, is called with each stage index
+and blocks until that stage may run. SETTLE-TIMEOUT is how long to wait for a
+terminal state once the workers stop."
+  ;; withdraw the last session before the workload it describes is reset
+  (setf *live-session* nil)
   (reset-workload)
   (let* ((rng (make-rng seed))
          (*fault-rng* (make-rng (+ seed 7)))
@@ -88,6 +159,7 @@ Expects an open audit log."
          (ps (register-currency-patch-set
               :ramp ramp :alpha alpha :beta beta :min-n min-n :max-n max-n
               :paired-fallback paired-fallback))
+         (pacer (make-pacer :pace pace))
          (tasks-run (list 0))
          (stop (list nil)))
     (handler-case (splice:install ps)
@@ -95,7 +167,11 @@ Expects an open audit log."
         (return-from run-canary-session
           (make-session-result :final-state :vetoed :veto-p t
                                :transitions (princ-to-string e)))))
+    (publish-session :patch-set ps :orders orders :seed seed :fault fault
+                     :threads threads :started (get-internal-real-time)
+                     :audit-start-seq audit-start-seq :pacer pacer)
     (flet ((run-one (i task-rng)
+             (await-pace pacer ps)
              ;; think time keeps load tracking the ramp when canary is slow
              (when (> threads 1) (sleep 0.0002))
              (when (fault-active-p :load-correlated)
@@ -137,7 +213,7 @@ Expects an open audit log."
           (loop for i from 1 to max-tasks
                 until (terminal-p)
                 do (run-one i rng) (setf (car tasks-run) i))))
-    (splice:wait-for-state ps '(:promoted :rolled-back :frozen) :timeout 30)
+    (splice:wait-for-state ps '(:promoted :rolled-back :frozen) :timeout settle-timeout)
     (let ((result
             (make-session-result
              :final-state (splice:patch-set-state ps)

@@ -69,7 +69,8 @@
   (let ((readings (read-image *live-session* (getf snapshot :audit-seq 0))))
     (if (keywordp readings)
         snapshot
-        (let ((next (next-snapshot (snapshot-for-session snapshot readings) readings)))
+        (let* ((started (getf (getf readings :session) :started))
+               (next (next-snapshot (snapshot-for-session snapshot started) readings)))
           (dolist (sink sinks next)
             (funcall sink next))))))
 

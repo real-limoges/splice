@@ -1,6 +1,6 @@
 ;;;; snapshot.lisp
 
-(in-package #'splice-orders/demo)
+(in-package #:splice-orders/demo)
 
 (defconstant +snapshot-version+ 1
   "Changes whenever a snapshot field changes meaning or shape")
@@ -40,7 +40,7 @@ fails loudly instead of reading NIL"
   "POINTS with POINT, which is a (n . llr) pair. Unchanged when POINT is 0
    (the stream hasn't started or already drawn"
   (if (or (zerop (car point))
-          (eql (car point) (car first (last points))))
+          (eql (car point) (car (first (last points)))))
       points
       (append points (list point))))
 
@@ -72,3 +72,59 @@ fails loudly instead of reading NIL"
   (finish-walk (reduce #'fold-step (getf readings :sprt-steps) :initial-value walk)
                (getf readings :bounds)
                (getf readings :tail)))
+
+;;; Snapshots
+
+(defun empty-snapshot ()
+  "Session's first frame folds from. Empty stage 0 walk"
+  (list :version +snapshot-version+ :seq -1 :audit-seq 0 :session '()
+        :sprt (start-walk 0)))
+
+(defun snapshot-for-session (snapshot started)
+  "SNAPSHOT if it belongs to the sesion published at STARTED. Otherwsie a fresh
+   empty snapshot, so one session's walk never runs into the next one's"
+  (if (eql started (getf (getf snapshot :session) :started))
+      snapshot
+      (empty-snapshot)))
+
+(defun next-snapshot (previous readings)
+  "Snapshot after PREVIOUS, given READINGS taken from the image"
+  (list :version +snapshot-version+
+        :seq (1+ (getf previous :seq))
+        :elapsed-ms (getf readings :elapsed-ms)
+        :audit-seq (getf readings :audit-seq)
+        :paused-at (getf readings :paused-at)
+        :session (getf readings :session)
+        :set (getf readings :set)
+        :functions (getf readings :functions)
+        :class (getf readings :class)
+        :orders (getf readings :orders)
+        :canary-born (getf readings :canary-born)
+        :threads (getf readings :threads)
+        :sprt (next-sprt (getf previous :sprt) readings)
+        :faults (getf readings :faults)))
+
+;;; Text form: One snapshot per line
+
+(defun write-snapshot (form stream)
+  "Print FORM readably on the one line of STREAM"
+  (with-standard-io-syntax
+    (let ((*package* (find-package '#:splice-orders/demo))
+          (*print-readably* t)
+          (*print-pretty* nil))
+      (prin1 form stream)
+      (terpri stream))))
+
+(defun read-snapshot (stream)
+  "Next form on STREAM. :EOF at the end or a line cut short"
+  (with-standard-io-syntax
+    (let ((*package* (find-package '#:splice-orders/demo))
+          (*read-eval* nil))
+      (handler-case (read stream nil :eof)
+        (end-of-file () :eof)))))
+
+(defun read-all-snapshots (stream)
+  "Every form left on STREAM (in order)"
+  (loop for form = (read-snapshot stream)
+        until (eq form :eof)
+        collect form))
