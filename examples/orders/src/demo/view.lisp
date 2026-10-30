@@ -29,7 +29,8 @@
   "Lay out BODY and wire its buttons. Runs on the tab's connection thread, before registering"
   (clog:create-div body :content (d:page-html))
   (clog:js-execute body (d:page-script))
-  (wire-buttons body))
+  (wire-buttons body)
+  (wire-scrubber body))
 
 (defun wire-buttons (body)
   (on-click body "next" (lambda () (d:open-gate d:*gate* :next-stage)))
@@ -105,3 +106,63 @@
 
 (defun stop-view ()
   (clog:shutdown))
+
+(defun stop-frame-sources ()
+  "Stop the sampler + player and wait. :stopped, or :sampler-stuck / :player-stuck
+when that thread did not join and may be still writing"
+  (cond ((eq :not-joined (d:stop-sampler)) :sampler-stuck)
+        ((eq :not-joined (d:stop-player)) :player-stuck)
+        (t :stopped)))
+
+(defun send-to-pages (script)
+  "Send SCRIPT to every open page from this thread. Each page's next frame is a full one"
+  (count :sent (mapcar (lambda (entry) (deliver (car entry) (list script) nil))
+                       (live-connections))))
+
+(defun show-chain-check (path)
+  "Verify the closed audit log at PATH and draw its strip + reconstruction line.
+Returns the chain-result plist, or what stop-frame-sources said when it didn't stop"
+  (let ((stopped (stop-frame-sources)))
+    (if (eq :stopped stopped)
+        (draw-chain-check "The audit log" (d:chain-result path) (d:reconstruction-text path))
+        stopped)))
+
+(defun show-tamper-check (path)
+  "Tamper with a copy of the log at PATH, verify the copy and draw its strip.
+Returns the copy's chain-result plist, or what stop-frame-sources said when it didn't stop"
+  (let ((stopped (stop-frame-sources)))
+    (if (eq :stopped stopped)
+        (draw-chain-check "A copy with one digit changed" (d:chain-result (d:tamper-copy path))
+                          "Reconstruction runs only on the original log")
+        stopped)))
+
+(defun draw-chain-check (label result reconstruction)
+  (send-to-pages (d:chain-check-js label result reconstruction))
+  result)
+
+;;; ---------------------------------------------------------------------
+;;; Replay
+
+(defun switch-to-replay (path)
+  "Replace live frames with the recording at PATH. Returns :started, the status that refused
+the recording, or :sampler-stuck / :player-stuck."
+  (multiple-value-bind (status header snapshots) (d:load-recording path)
+    (if (eq status :loaded)
+        (play-instead header snapshots)
+        status)))
+
+(defun play-instead (header snapshots)
+  "Stop every live frame source, then play SNAPSHOTS into the page."
+  (let ((stopped (stop-frame-sources)))
+    (if (eq :stopped stopped)
+        (progn (forget-snapshots)
+               (d:start-player header snapshots #'write-frame :reset #'forget-snapshots))
+        stopped)))
+
+(defun wire-scrubber (body)
+  "Connect the replay row's scrubber and buttons in BODY to the player."
+  (on-click body "pause" (lambda () (d:pause-player t)))
+  (on-click body "play" (lambda () (d:pause-player nil)))
+  (clog:set-on-change (clog:attach-as-child body "scrub" :clog-type 'clog:clog-form-element)
+                      (lambda (element)
+                        (d:jump-player (parse-integer (or (clog:value element) "") :junk-allowed t)))))

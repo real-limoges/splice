@@ -3,8 +3,9 @@
 (in-package #:splice-orders/demo)
 
 (defstruct gate
-  (lock (sb-thread:make-mutex :name "demo-gate"))
-  (queue (sb-thread:make-waitqueue))
+  (lock (sb-thread:make-mutex :name "demo-gate") :read-only t)
+  (queue (sb-thread:make-waitqueue) :read-only t)
+  ;; mutable
   (opened '()))                         ; keys opened but not consumed
 
 (defun open-gate (gate key)

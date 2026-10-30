@@ -94,7 +94,7 @@ FN on the orders and the set. Restores the pristine workload after."
 
 (test canary-born-orders-read-current
   (with-installed-orders ((orders ps) 40 42)
-    (declare (ignore ps))
+    (declare (ignore orders ps))
     (let ((born (canary-born-orders 40)))
       (is (= 0 (probe-pending-count born)))
       (is (= 1 (length (remove-duplicates (mapcar #'sb-kernel:layout-of born))))))))

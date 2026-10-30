@@ -1,3 +1,5 @@
+;;;; sampler.lisp: reads the image without disturbing it and folds each frame into a snapshot.
+
 (in-package #:splice-orders/demo)
 
 (defparameter *lane-prefixes*
@@ -112,7 +114,7 @@ in between shows as one frame of :PENDING never as a wrong :CURRENT."
 
 (defun read-lane (thread)
   (list :name (sb-thread:thread-name thread)
-        :pin (thread-pins thread)))
+        :pins (thread-pins thread)))
 
 (defun read-lanes ()
   "One lane per session thread, sorted by name so they stay in their

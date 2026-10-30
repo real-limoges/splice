@@ -1,3 +1,4 @@
+;;;; render.lisp: pure renderers from snapshots to JavaScript strings for the page.
 
 (in-package #:splice-orders/demo)
 
@@ -190,7 +191,7 @@ PREVIOUS is NIL for a fresh page, which gets every region."
 
 (defun call-graph-input (snapshot)
   (list (getf snapshot :functions)
-        (getf snapshot :set) :fraction))
+        (getf (getf snapshot :set) :fraction)))
 
 (defun render-call-graph (previous next)
   (if (same-input-p #'call-graph-input previous next)
@@ -391,3 +392,41 @@ Walks without bounds yet is a label alone"
                    (set-property "scrub" "max" (princ-to-string (1- (getf replay :frames))))
                    (set-property "scrub" "value" (princ-to-string (getf replay :index))))
       (concatenate 'string (set-hidden "replay" t) (set-hidden "controls" nil))))
+
+;;; ---------------------------------------------------------------------
+;;; Draw
+
+(defun chain-strip-svg (entry-count first-bad-seq)
+  "A hundred blocks over ENTRY-COUNT entries: green before the bucket holding FIRST-BAD-SEQ
+and red from it onwards. FIRST-BAD-SEQ is NIL for an intact chain"
+  (svg 1000 60
+       (loop for block from 0 below 100
+             collect (svg-rect (* block 10) 0 9 60 (block-color block entry-count first-bad-seq)))))
+
+(defun block-color (block entry-count first-bad-seq)
+  (if (and first-bad-seq (>= block (seq-bucket first-bad-seq entry-count)))
+      :reject
+      :accept))
+
+(defun seq-bucket (seq entry-count)
+  "Which of the buckets holds entry SEQ, counting seqs from 1"
+  (floor (* 100 (1- seq)) (max 1 entry-count)))
+
+(defun chain-check-js (label result reconstruction)
+  "Switch the page to the chain strip and draw RESULT, a plist from chain-result"
+  (concatenate 'string
+               (set-mode "chain")
+               (set-hidden "replay" t)
+               (set-text "chain-label" label)
+               (set-property "chain-strip" "innerHTML"
+                             (js-string (chain-strip-svg (getf result :entries)
+                                                         (getf result :first-bad-seq))))
+               (set-text "chain-detail" (chain-detail-text result))
+               (set-text "reconstruction" reconstruction)))
+
+(defun chain-detail-text (result)
+  (if (getf result :ok)
+      (format nil "Hash chain intact over ~d entries" (getf result :entries))
+      (format nil "Chain breaks at seq ~d: entry ~d was changed (~d entries in the file)"
+              (getf result :break-seq) (getf result :first-bad-seq) (getf result :entries))))
+
