@@ -9,16 +9,8 @@
   "Shim factories compiled once per arity. Skipping &REST/APPLY cuts canary
 call cost from ~2x to ~1.5x.")
 
-(defun new (name)
-  "Inside a contract check: the patch set's new implementation of NAME."
-  (let ((fp (find name (patch-set-fn-patches *contract-context*)
-                  :key #'fn-patch-name)))
-    (unless fp (error "~a is not patched by ~a" name
-                      (patch-set-name *contract-context*)))
-    (fn-patch-new-fn fp)))
-
-;;; DEFPATCH-SET: the declaration macro
-;;;
+;;; ---------------------------------------------------------------------
+;;; DEFPATCH-SET declaration macro
 ;;; Each clause kind has a function that turns the clause into the form
 ;;; constructing its patch struct; the macro collects them by kind.
 
@@ -84,7 +76,9 @@ call cost from ~2x to ~1.5x.")
                     :class-patches (list ,@(clause-forms :class clauses))
                     :contracts (list ,@(clause-forms :contract clauses)))))
 
-;;; Static checks that run at registration, veto early
+;;; ---------------------------------------------------------------------
+;;; Static checks
+;;; Run at registration, so a bad set is vetoed early.
 
 (defun lambda-list-of (function)
   "FUNCTION's lambda list. A generic function answers with declared lambda list.
@@ -176,7 +170,8 @@ This is such a cool use of code as data."
   (error 'patch-vetoed :patch-set ps :contract kind :detail detail))
 
 ;;; ---------------------------------------------------------------------
-;;; Registration: capture the old world, run static checks, audit
+;;; Registration
+;;; Capture the old world, run static checks, audit.
 
 (defun capture-old-function (ps fp)
   "Check FP's function exists, then record the original for rollback."
@@ -265,6 +260,8 @@ Any failed check vetoes PS."
   (audit-registration ps)
   ps)
 
+;;; ---------------------------------------------------------------------
+;;; Contracts
 ;;; Veto gate between REGISTERED and STAGED
 
 (defun check-contract (contract)
@@ -295,8 +292,17 @@ Contracts run outside any task, so a plain call reaches old code."
                (when (eq verdict :fail)
                  (return-from run-contracts (contract-name contract)))))))))
 
-;;; Shims: the per-task routing indirection
-;;;
+(defun new (name)
+  "Inside a contract check: the patch set's new implementation of NAME."
+  (let ((fp (find name (patch-set-fn-patches *contract-context*)
+                  :key #'fn-patch-name)))
+    (unless fp (error "~a is not patched by ~a" name
+                      (patch-set-name *contract-context*)))
+    (fn-patch-new-fn fp)))
+
+;;; ---------------------------------------------------------------------
+;;; Shims
+;;; The per-task routing indirection.
 ;;; Every shim asks which route its task is pinned to, then either calls old
 ;;; code or calls new code with its errors noted as canary anomalies. The
 ;;; three kinds of shim differ only in how they pass arguments, so the shared
@@ -328,6 +334,7 @@ when PS has paired fallback."
       (call-new-falling-back ps run-new run-old)
       (call-new-noting-anomalies ps run-new)))
 
+;;; ---------------------------------------------------------------------
 ;;; Function shims
 
 (defun fixed-arity-factory-form (arity)
@@ -393,6 +400,7 @@ range or can't be read"
             (:new (fn-patch-new-fn fp))))
     (setf (fn-patch-shim fp) nil)))
 
+;;; ---------------------------------------------------------------------
 ;;; Method shims
 
 (defun old-method-callable (mp)

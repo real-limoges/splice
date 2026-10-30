@@ -7,6 +7,7 @@
 
 (defstruct opaque-thing x)
 
+;;; ---------------------------------------------------------------------
 ;;; Making values loggable
 
 (test flatten-newlines
@@ -41,6 +42,7 @@
     (is (char= #\Z (char ts 23)))
     (is (every #'digit-char-p (remove-if (lambda (c) (find c "-T:.Z")) ts)))))
 
+;;; ---------------------------------------------------------------------
 ;;; Writing entries
 
 (test audit-without-a-log-is-a-no-op
@@ -73,6 +75,7 @@
       (is (string= (splice:sha256-hex first-line)
                    (getf (second (log-entries path)) :prev-hash))))))
 
+;;; ---------------------------------------------------------------------
 ;;; The chain
 
 (defun write-lines (path lines)
@@ -116,6 +119,7 @@
       (lambda (copy)
         (is (equal '(nil 1 3) (multiple-value-list (splice:verify-audit-chain copy))))))))
 
+;;; ---------------------------------------------------------------------
 ;;; Reconstruction: the pure fold
 
 (defun fold (&rest entries)
@@ -212,6 +216,7 @@
     (is (eq :rolled-back (state-of state 'a)))
     (is (eq :promoted (state-of state 'b)))))
 
+;;; ---------------------------------------------------------------------
 ;;; Reconstruction from a file
 
 (test reconstruct-state-folds-a-written-log

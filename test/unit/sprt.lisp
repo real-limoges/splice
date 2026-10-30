@@ -17,6 +17,7 @@ LIMIT observations go by. Returns the verdict."
           return verdict
         finally (return :continue)))
 
+;;; ---------------------------------------------------------------------
 ;;; Construction
 
 (test thresholds-follow-wald
@@ -46,6 +47,7 @@ LIMIT observations go by. Returns the verdict."
     (is (close-to 0.1d0 (splice::sprt-p0 s)))
     (is (close-to 0.3d0 (splice::sprt-p1 s)))))
 
+;;; ---------------------------------------------------------------------
 ;;; Observation
 
 (test each-observation-adds-its-log-likelihood-ratio
@@ -96,6 +98,7 @@ LIMIT observations go by. Returns the verdict."
     (dolist (key '(:n :llr :a :b :p0 :p1 :alpha :beta))
       (is-true (member key snap) "snapshot is missing ~s" key))))
 
+;;; ---------------------------------------------------------------------
 ;;; Control ring
 
 (defun ring-with (outcomes &key (size 500) (latency 1))

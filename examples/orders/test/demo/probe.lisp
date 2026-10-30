@@ -12,12 +12,18 @@
 (def-suite demo-probe :description "The layout probe")
 (in-suite demo-probe)
 
+;;; ---------------------------------------------------------------------
+;;; Probe
+
 (defun probe-pending-p (instance)
   "The reader under test. Sample ships it as LAYOUT-PENDING-P"
   (not (null (sb-kernel:layout-invalid (sb-kernel:layout-of instance)))))
 
 (defun probe-pending-count (instances)
   (count-if #'probe-pending-p instances))
+
+;;; ---------------------------------------------------------------------
+;;; Fixtures
 
 (defun call-with-probe-log (fn)
   "Call FN with a fresh global audit log, visible to the completion threads
@@ -57,6 +63,9 @@ FN on the orders and the set. Restores the pristine workload after."
   "COUNT orders mae inside tasks as the workload makes them during a canary"
   (loop for id from 2000000 below (+ 2000000 count)
         collect (splice:with-task (:id id) (orders:make-test-order))))
+
+;;; ---------------------------------------------------------------------
+;;; Tests
 
 (test reading-changes-nothing
   (with-installed-orders ((orders ps) 40 42)

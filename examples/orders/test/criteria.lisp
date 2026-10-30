@@ -26,6 +26,9 @@
 (defvar *batches* '())
 (defvar *big-log* nil "The log every section after the checkpoints shares.")
 
+;;; ---------------------------------------------------------------------
+;;; Helpers
+
 (defun root () (asdf:system-source-directory "splice-orders"))
 (defun scratch-file (name) (merge-pathnames name (uiop:temporary-directory)))
 
@@ -52,7 +55,8 @@
     (list (max 0.0 (- center half)) (min 1.0 (+ center half)))))
 
 ;;; ---------------------------------------------------------------------
-;;; C5a: reconstruction checkpoints (own log so the fold is single-session)
+;;; C5a: reconstruction checkpoints
+;;; Own log, so the fold is single-session.
 
 (defun check-reconstruction-checkpoints ()
   (format t "~%--- reconstruction checkpoints (pre-patch / mid-canary / post-rollback)~%")
@@ -79,7 +83,8 @@
     (splice:close-audit-log)))
 
 ;;; ---------------------------------------------------------------------
-;;; Resume after a hard trigger (own log, like the checkpoints)
+;;; Resume after a hard trigger
+;;; Own log, like the checkpoints.
 
 (defun check-resume-after-hard-trigger ()
   (format t "~%--- resume after a hard trigger on a lossy set~%")
@@ -109,7 +114,8 @@
     (splice:close-audit-log)))
 
 ;;; ---------------------------------------------------------------------
-;;; Runtime contracts see old code on the old route (own log)
+;;; Runtime contracts
+;;; They see old code on the old route. Own log.
 
 (defun route-probe (x)
   "Old side of the probe patch: names the code that ran. Call it through its
@@ -169,7 +175,8 @@ type-check the shim's :NEW into an error."
     (splice:close-audit-log)))
 
 ;;; ---------------------------------------------------------------------
-;;; C4 pre-work: the pristine workload signature, captured before any patch
+;;; C4 pre-work: pristine signature
+;;; The workload signature, captured before any patch.
 
 (defun workload-signature (seed n)
   "Totals from N seeded orders run against whatever code and class shape are
@@ -211,7 +218,9 @@ what the rollback left behind."
 migrated forward mid-canary, then restored)"
              (and rev (plusp (getf rev :journal-exact))) rev))))
 
-;;; C4: post-rollback workload identical to never-patched control
+;;; ---------------------------------------------------------------------
+;;; C4: post-rollback workload
+;;; Identical to the never-patched control.
 
 (defun check-post-rollback-workload (pristine)
   (let ((post (workload-signature 777 300)))
@@ -222,7 +231,8 @@ migrated forward mid-canary, then restored)"
                    (length post)))))
 
 ;;; ---------------------------------------------------------------------
-;;; C2/C6: fault matrix + statistical honesty over *runs* sessions/class
+;;; C2/C6: fault matrix and statistical honesty
+;;; Over *RUNS* sessions per fault class.
 
 (defun batch-count (state b)
   (count state (batch-final-states b)))
@@ -287,8 +297,9 @@ migrated forward mid-canary, then restored)"
                  nil))))))
 
 ;;; ---------------------------------------------------------------------
-;;; C3: coherence. Promotion swaps only once the :old pins drain, so no task
-;;; runs a mix of old and new code; the sampled routes are checked offline.
+;;; C3: coherence
+;;; Promotion swaps only once the :old pins drain, so no task runs a mix of
+;;; old and new code; the sampled routes are checked offline.
 
 (defun hold-old-task (ps release)
   "Start a thread whose task pins PS :old and waits for the semaphore
@@ -412,7 +423,8 @@ RELEASE. Returns the thread once the pin is counted."
                  nil))))))
 
 ;;; ---------------------------------------------------------------------
-;;; C5b: the whole criteria log: chain intact, reconstruction matches image
+;;; C5b: the whole criteria log
+;;; Chain intact, reconstruction matches the image.
 
 (defun check-audit-log ()
   "Caller has closed *BIG-LOG*."
@@ -437,7 +449,7 @@ RELEASE. Returns the thread once the pin is counted."
              (and (not ok) break-seq) break-seq))))
 
 ;;; ---------------------------------------------------------------------
-;;; report
+;;; Report
 
 (defun write-report ()
   (with-open-file (out (merge-pathnames "artifacts/criteria-report.md" (root))

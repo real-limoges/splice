@@ -7,6 +7,9 @@
 (def-suite cluster-protocol :in splice-tests)
 (in-suite cluster-protocol)
 
+;;; ---------------------------------------------------------------------
+;;; Fixtures
+
 (defun wire-value-p (value)
   "True when VALUE holds only keywords, strings, integers, and lists."
   (typecase value
@@ -67,7 +70,8 @@ the new code always fails, so the error SPRT rejects at its floor of 5"
         when (eq :audit (first effect))
           collect (second effect)))
 
-;;; The Spec
+;;; ---------------------------------------------------------------------
+;;; The spec
 
 (test spec-hash-ignores-printer-settings
   (let ((plain (splice/cluster:spec-hash (probe-spec))))
@@ -104,7 +108,8 @@ the new code always fails, so the error SPRT rejects at its floor of 5"
            (is (null (splice:find-patch-set 'protocol-probe-set))))
       (splice:unregister-patch-set 'protocol-probe-set))))
 
-;;; The Pure Step
+;;; ---------------------------------------------------------------------
+;;; The pure step
 
 (test every-member-prepared-starts-commit
   (multiple-value-bind (cluster effects) (shipped-cluster :a :b)
@@ -224,7 +229,9 @@ the new code always fails, so the error SPRT rejects at its floor of 5"
              (is (= 0.1d0 (splice::patch-set-beta ps))))
         (splice:unregister-patch-set 'protocol-probe-set)))))
 
-;;; A conductor and a member in this image, but no socket
+;;; ---------------------------------------------------------------------
+;;; Conductor and member in one image
+;;; No socket.
 
 (defstruct (test-wire (:constructor make-test-wire ()))
   (lock (sb-thread:make-mutex :name "test wire") :read-only t)

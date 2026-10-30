@@ -3,6 +3,9 @@
 
 (in-package #:splice)
 
+;;; ---------------------------------------------------------------------
+;;; Structs and registry
+
 (defstruct fn-patch
   name            ; symbol naming the function
   new-fn          ; compiled new implementation
@@ -66,6 +69,9 @@
 (defun find-patch-set (name)
   (gethash name *patch-sets*))
 
+;;; ---------------------------------------------------------------------
+;;; Lifecycle state
+
 (defun stage-keyword (fraction)
   (intern (format nil "CANARY-~d" fraction) :keyword))
 
@@ -108,6 +114,9 @@ promoting ones (pin :new across the swap) and rolling-back or :frozen ones
                  (push ps out)))
              *patch-sets*)
     out))
+
+;;; ---------------------------------------------------------------------
+;;; Set lock
 
 (defun defer (thunk)
   "Run THUNK once the enclosing WITH-SET-LOCK releases"

@@ -8,6 +8,9 @@
 (defvar *demo-running* nil "True when sampler thread should keep sampling")
 (defvar *sampler-thread* nil "Sample thread last started or NIL")
 
+;;; ---------------------------------------------------------------------
+;;; Image readings
+
 (defun layout-pending-p (instance)
   "True while INSTANCE is waiting for a class update. Reads the layout not slots."
   (not (null (sb-kernel:layout-invalid (sb-kernel:layout-of instance)))))
@@ -89,6 +92,7 @@ in between shows as one frame of :PENDING never as a wrong :CURRENT."
           :lower (float (splice:sprt-lower sprt) 1.0)
           :min-n (splice::sprt-min-n sprt))))
 
+;;; ---------------------------------------------------------------------
 ;;; Threads
 
 (defun name-starts-with-p (prefix name)
@@ -116,6 +120,7 @@ place."
   (sort (mapcar #'read-lane (remove-if-not #'lane-thread-p (sb-thread:list-all-threads)))
         #'string< :key (lambda (lane) (getf lane :name))))
 
+;;; ---------------------------------------------------------------------
 ;;; Audit tail
 
 (defun read-audit-line (line)
@@ -167,7 +172,8 @@ Then it's the second value from TAIL-STATUS"
                         (eq (getf entry :patch-set) set-name)))
                  entries))
 
-;;; One Frame
+;;; ---------------------------------------------------------------------
+;;; One frame
 
 (defun elapsed-ms (started)
   (round (* 1000 (- (get-internal-real-time) started))
@@ -229,6 +235,9 @@ Things like a registry race or a class mid-redefinition"
   "Hand SNAPSHOT to every sink in order. Returns the faults, newest *five*"
   (let ((faults (remove :ok (mapcar (lambda (sink) (call-sink sink snapshot)) sinks))))
     (subseq faults 0 (min 5 (length faults)))))
+
+;;; ---------------------------------------------------------------------
+;;; Sampler thread
 
 (defun sample-session (snapshot faults session sinks)
   "SAMPLE-ONCE for a published SESSION. A frame read while the session was withdrawn is dropped

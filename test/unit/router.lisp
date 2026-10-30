@@ -6,6 +6,7 @@
 (def-suite router :in splice-tests)
 (in-suite router)
 
+;;; ---------------------------------------------------------------------
 ;;; State predicates
 
 (test stage-keyword-names-the-stage
@@ -27,6 +28,7 @@
                    :rolling-back :restoring :frozen))
     (is-false (splice::finished-p (splice::make-patch-set :state state)))))
 
+;;; ---------------------------------------------------------------------
 ;;; The draw
 
 (test draw-is-the-hash-prefix-mod-100
@@ -52,6 +54,7 @@
                         (splice::routing-draw task 'set-b)))
                    (loop for task from 1 to 50 collect task))))
 
+;;; ---------------------------------------------------------------------
 ;;; Pinning
 
 (defun set-in (state &key (fraction 0) (name 'pin-probe))

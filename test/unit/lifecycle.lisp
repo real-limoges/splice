@@ -7,6 +7,7 @@
 (def-suite lifecycle :in splice-tests)
 (in-suite lifecycle)
 
+;;; ---------------------------------------------------------------------
 ;;; WITH-SET-LOCK
 
 (test deferred-effects-run-after-release-in-order
@@ -33,7 +34,9 @@
                        (splice::with-set-lock (ps) (setf relocked t)))))
     (is-true relocked)))
 
-;;; Live sets. Each test installs a set over LIFECYCLE-PROBE and retires it
+;;; ---------------------------------------------------------------------
+;;; Live sets
+;;; Each test installs a set over LIFECYCLE-PROBE and retires it
 ;;; afterwards, which puts the original function back.
 
 (defun lifecycle-probe (x) x)
@@ -109,6 +112,7 @@ retire it whatever happened."
 (defun state-trail (ps)
   (mapcar #'car (splice:patch-set-lifecycle-history ps)))
 
+;;; ---------------------------------------------------------------------
 ;;; Operator handlers re-entering the lifecycle
 
 (test a-verdict-handler-can-freeze-after-an-accept
@@ -199,6 +203,8 @@ retire it whatever happened."
     (is-false (splice::patch-set-sealed ps))
     (is (eq :canary-50 (splice:patch-set-state ps)))))
 
+;;; ---------------------------------------------------------------------
+;;; Operator requests by state
 ;;; Which operator requests each state allows, on bare sets: none of these
 ;;; reach a transition, so nothing needs installing
 
@@ -231,6 +237,8 @@ retire it whatever happened."
              :refused)
       (check seal-it '(:registered :canary-5 :frozen :rolling-back :rolled-back) :refused))))
 
+;;; ---------------------------------------------------------------------
+;;; Completion threads
 ;;; Completion threads give way to a freeze that lands during the drain.
 ;;; Nothing is pinned, so the drain ends at once.
 

@@ -21,6 +21,7 @@ fails loudly instead of reading NIL"
           "~s is not a snapshot field" field)
   (getf snapshot field))
 
+;;; ---------------------------------------------------------------------
 ;;; SPRT walk
 
 (defun make-walk (stage trimmed bounds errors slow)
@@ -73,6 +74,7 @@ fails loudly instead of reading NIL"
                (getf readings :bounds)
                (getf readings :tail)))
 
+;;; ---------------------------------------------------------------------
 ;;; Snapshots
 
 (defun empty-snapshot ()
@@ -104,7 +106,9 @@ fails loudly instead of reading NIL"
         :sprt (next-sprt (getf previous :sprt) readings)
         :faults (getf readings :faults)))
 
-;;; Text form: One snapshot per line
+;;; ---------------------------------------------------------------------
+;;; Text form
+;;; One snapshot per line.
 
 (defun write-snapshot (form stream)
   "Print FORM readably on the one line of STREAM"

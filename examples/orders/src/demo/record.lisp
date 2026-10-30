@@ -15,6 +15,9 @@
 (defvar *player* nil
   "Replay player: its thread, position, and stop flag. NIL before first replay")
 
+;;; ---------------------------------------------------------------------
+;;; Recording
+
 (defun make-recorder (path header)
   "Open PATH and write the HEADER. Returns two values;
     - A sink that appends snapshots
@@ -60,6 +63,9 @@ It's a plist of :seed :fault :threads :pre-existing"
         :threads (getf settings :threads)
         :pre-existing (getf settings :pre-existing)))
 
+;;; ---------------------------------------------------------------------
+;;; Loading
+
 (defun load-recording (path &key (commit (splice-commit)))
   "Read at PATH. Still working out what to return here"
   (with-open-file (in path)
@@ -78,6 +84,9 @@ It's a plist of :seed :fault :threads :pre-existing"
 (defun current-version-p (form)
   "True when FORM (a header or snapshot) is at this image's snapshot version."
   (eql +snapshot-version+ (or (getf form :snapshot-version) (getf form :version))))
+
+;;; ---------------------------------------------------------------------
+;;; Replay
 
 (defun next-step (position count)
   "What the player does next - (:play i), (:jump i), :paused or :done"
@@ -125,6 +134,9 @@ It's a plist of :seed :fault :threads :pre-existing"
     (let ((step (next-step position (length snapshots))))
       (when (eq step :done) (return :finished))
       (play-step step snapshots sink speed on-jump))))
+
+;;; ---------------------------------------------------------------------
+;;; Player
 
 (defun mark-replay (snapshot header index count faults)
   "SNAPSHOT with :replay plist for the replay row, and the player's FAULTS in

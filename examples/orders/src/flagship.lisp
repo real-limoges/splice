@@ -5,6 +5,9 @@
 
 (in-package #:splice-orders)
 
+;;; ---------------------------------------------------------------------
+;;; New order math
+
 (defun write-through-float (order cents)
   "Keep FLOAT-TOTAL in sync while it exists (the canary union shape)."
   (when (slot-exists-p order 'float-total)
@@ -35,6 +38,9 @@
     (write-through-float order cents)
     cents))
 
+;;; ---------------------------------------------------------------------
+;;; Class migration
+
 (defun forward-migration (instance old-values)
   (when (and (fault-active-p :migration)
              (let ((ft (getf old-values 'float-total)))
@@ -47,6 +53,9 @@
 (defun backward-migration (instance new-values)
   (setf (slot-value instance 'float-total)
         (/ (or (getf new-values 'amount-minor-units) 0) 100.0)))
+
+;;; ---------------------------------------------------------------------
+;;; Patch set
 
 (defun make-test-order (&key (cents 1099) (code nil))
   (make-instance 'order :id -1 :item-count 1 :unit-price (/ cents 100.0)

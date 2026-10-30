@@ -40,7 +40,9 @@ NIL from the start of a session until its install succeeds")
   detection-observations reversal-report pre-existing-snapshot
   post-rollback-comparison wallclock-ms)
 
-;;; Hooks for observers (live session, pacing, held :old task)
+;;; ---------------------------------------------------------------------
+;;; Hooks for observers
+;;; Live session, pacing, held :old task.
 
 (defun publish-session (&rest initargs)
   "Make a LIVE-SESSION from INITARGS and publish it to every thread"
@@ -235,6 +237,9 @@ terminal state once the workers stop."
                 (session-result-detection-observations result)))
       result)))
 
+;;; ---------------------------------------------------------------------
+;;; Evidence
+
 (defun detection-observations-from-audit (&optional (after-seq 0))
   "SPRT sample count at the rollback decision, read from audit log entries
 after AFTER-SEQ."
@@ -272,6 +277,9 @@ is original, and pre-existing orders match their pre-patch snapshot."
           :class-shape-original shape-ok
           :snapshot-restored restored
           :snapshot-total (length orders))))
+
+;;; ---------------------------------------------------------------------
+;;; Baseline workload
 
 (defun run-workload (&key (tasks 500) (seed 1))
   "Plain workload with no patch in flight (baseline / overhead measurement)."

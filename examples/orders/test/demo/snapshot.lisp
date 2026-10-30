@@ -5,6 +5,9 @@
 (def-suite demo-snapshot :in demo)
 (in-suite demo-snapshot)
 
+;;; ---------------------------------------------------------------------
+;;; Helpers
+
 (defun plain-data-p (form)
   "True when FORM only holds symbols, numbers, strings, conses, and
    simple vectors"
@@ -26,6 +29,9 @@
   (d::next-sprt walk (list :sprt-steps steps :tail tail
                            :bounds '(:upper 4.553877 :lower -2.985682 :min-n 50))))
 
+;;; ---------------------------------------------------------------------
+;;; Fixtures
+
 (test fixtures-round-trip
   (dolist (snapshot (all-fixtures))
     (is (equalp snapshot (round-trip snapshot)))))
@@ -34,6 +40,9 @@
   (dolist (snapshot (all-fixtures))
     (is (plain-data-p snapshot)))
   (is (not (plain-data-p (list :orders (vector (orders:make-test-order)))))))
+
+;;; ---------------------------------------------------------------------
+;;; Folding the SPRT walk
 
 (test fold-same-stage-appends
   (let ((walk (walk-after (d::start-walk 0)
@@ -57,6 +66,9 @@
     (is (eq t (getf trimmed :trimmed)))
     (is (eq t (getf later :trimmed)))
     (is (eq nil (getf next-stage :trimmed)))))
+
+;;; ---------------------------------------------------------------------
+;;; Sessions and reading
 
 (test another-session-folds-from-empty
   (let ((snapshot (list :seq 40 :audit-seq 900 :session '(:started 100))))
