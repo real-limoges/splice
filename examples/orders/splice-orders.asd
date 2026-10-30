@@ -55,11 +55,7 @@ presenter gate, recording and the act driver. Everything testable without a brow
                 :components ((:file "package")
                              (:file "snapshot")
                              (:file "sampler")
-                             (:file "render")
-                             (:file "gate")
-                             (:file "chain")
-                             (:file "record")
-                             (:file "driver"))))
+                             (:file "record"))))
   :in-order-to ((test-op (test-op "splice-orders/demo-tests"))))
 
 (defsystem "splice-orders/demo-tests"
@@ -68,12 +64,7 @@ presenter gate, recording and the act driver. Everything testable without a brow
   :serial t
   :components ((:module "test/demo"
                 :components ((:file "package")
-                             (:file "snapshot")
-                             (:file "sampler")
-                             (:file "render")
-                             (:file "gate")
-                             (:file "record")
-                             (:file "driver"))))
+                             (:file "snapshot"))))
   :perform (test-op (o c)
                     (declare (ignore o c))
                     (unless (uiop:symbol-call :fiveam :run!

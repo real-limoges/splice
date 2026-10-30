@@ -115,6 +115,7 @@ fails loudly instead of reading NIL"
       (prin1 form stream)
       (terpri stream))))
 
+
 (defun read-snapshot (stream)
   "Next form on STREAM. :EOF at the end or a line cut short"
   (with-standard-io-syntax
