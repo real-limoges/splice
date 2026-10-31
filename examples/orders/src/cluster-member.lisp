@@ -11,6 +11,9 @@
   (stopping nil)
   (worker nil))
 
+;;; ---------------------------------------------------------------------
+;;; Workload
+
 (defun prepare-harness (port fault)
   "Reset the workload, inject FAULT into the image if given, and make
 the pre-existing orders that must survive the migration. Returns the orders"
@@ -46,6 +49,9 @@ sending the conductor CLUSTER-MEMBER's health every 200 tasks"
                (process-order (workload-order rng i orders)))
              (when (zerop (mod i 200))
                (ignore-errors (splice/cluster:member-send-health cluster-member))))))
+
+;;; ---------------------------------------------------------------------
+;;; Cluster member host
 
 (defmethod splice/cluster:member-committed ((workload orders-workload) cluster-member ps)
   "Start the orders workload on its own thread"

@@ -18,6 +18,7 @@
 (defun spec-named (name specs)
   (find name specs :key (lambda (spec) (getf spec :name))))
 
+;;; ---------------------------------------------------------------------
 ;;; Slot specs
 
 (test a-bare-symbol-is-a-slot-with-defaults
@@ -43,6 +44,7 @@
     (is (equal '(r1 r2) (getf spec :readers)))
     (is (equal '(w1) (getf spec :writers)))))
 
+;;; ---------------------------------------------------------------------
 ;;; Union and final shapes
 
 (defun class-patch-over-old (&key add drop)
@@ -66,6 +68,7 @@
     (is (equal '(a b c) (names-of union)))
     (is (eql 1 (getf (spec-named 'b union) :initform)))))
 
+;;; ---------------------------------------------------------------------
 ;;; Capturing a live class
 
 (test capture-class-shape-reads-the-direct-slots

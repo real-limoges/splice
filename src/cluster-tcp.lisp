@@ -8,10 +8,12 @@
 
 (in-package #:splice/cluster)
 
-
 (defvar *wire-lock* (sb-thread:make-mutex)
   "Serializes writes to every cluster stream in the image.
 Replies, health reports, and the watch thread's message never interleave")
+
+;;; ---------------------------------------------------------------------
+;;; Wire format
 
 (defun send-form (stream form)
   (sb-thread:with-mutex (*wire-lock*)
@@ -28,6 +30,7 @@ text never runs here"
         (*read-eval* nil))
     (read stream nil :eof)))
 
+;;; ---------------------------------------------------------------------
 ;;; Member over TCP
 
 (defun audit-log-report (log-path)
@@ -92,6 +95,7 @@ the stream ends, closing the stream however it stops"
                      (return)))))
       (ignore-errors (close stream)))))
 
+;;; ---------------------------------------------------------------------
 ;;; Conductor over TCP
 
 (defun connect-member (port &key (retries 240))

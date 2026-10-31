@@ -20,6 +20,9 @@
 (defconstant +unix-epoch-universal-time+ 2208988800
   "Universal epoch time (1970-01-01T00:00:00Z)")
 
+;;; ---------------------------------------------------------------------
+;;; Writing the log
+
 (defun open-audit-log (path)
   (let ((stream (open path :direction :output :if-exists :supersede
                            :if-does-not-exist :create)))
@@ -85,7 +88,7 @@ Returns the entry's sequence number, or NIL when no log is open."
         (audit-log-seq log)))))
 
 ;;; ---------------------------------------------------------------------
-;;; Offline: chain verification and state reconstruction
+;;; Offline: chain verification
 
 (defun map-audit-entries (path fn &key (verify t))
   "Call FN on each entry of the log at PATH, verifying the hash chain.
@@ -113,6 +116,8 @@ memory."
 break-seq), where BREAK-SEQ is the first entry whose :prev-hash mismatches."
   (map-audit-entries path nil))
 
+;;; ---------------------------------------------------------------------
+;;; Offline: state reconstruction
 ;;; Reconstruction state is a plist of four alists, each newest first:
 ;;; :functions (name . impl), :classes (name . shape), :sets (name . state),
 ;;; and :members (set-name . (:functions fs :classes cs)) from registration.

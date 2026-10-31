@@ -1,4 +1,6 @@
 .DS_Store
+*.fasl
+examples/orders/recordings/
 
 # the notes tree is private except reference/, which is committed
 docs/*

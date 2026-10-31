@@ -7,9 +7,6 @@
 ;;;; source (two-phase prepare/commit, hash-verified), injects the latent
 ;;;; fault on the member at port 7802 only, and lets the conductor's
 ;;;; pooled-SPRT/local-reject aggregation roll back both members.
-;;;;
-;;;; Does not run yet: the TCP transport's RUN-MEMBER and RUN-CONDUCTOR are
-;;;; not written.
 
 (require :asdf)
 (defpackage :splice-cluster-demo (:use :cl))

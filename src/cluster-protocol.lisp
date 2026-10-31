@@ -23,6 +23,9 @@
 
 (in-package #:splice/cluster)
 
+;;; ---------------------------------------------------------------------
+;;; Spec hashing
+
 (defun canonical-text (value)
   "VALUE printed identically, whatever the caller's printer settings.
 VALUE holds *only* keywords, strings, integers, and lists"
@@ -53,7 +56,9 @@ in place of any it already had"
                   append (list key value))
           (list :alpha-ppm alpha-ppm :beta-ppm beta-ppm)))
 
-;;; Build patch set from a spec (member's side o PREPARE)
+;;; ---------------------------------------------------------------------
+;;; Patch sets from specs
+;;; The member's side of PREPARE.
 
 (defun spec-field (spec key)
   "SPEC's KEY field. Errors without"
@@ -150,7 +155,8 @@ or PATCH-VETOED when a static check refuses."
                                (getf spec :contracts))
             (spec-error-rate-args spec)))))
 
-;;; Conductor's view of the cluster as a value.
+;;; ---------------------------------------------------------------------
+;;; Conductor's view of the cluster as a value
 
 (defstruct (member-view (:copier nil))
   (id nil         :read-only t)
@@ -176,8 +182,6 @@ or PATCH-VETOED when a static check refuses."
                     :terminal terminal
                     :final final))
 
-
-
 (defstruct (cluster (:copier nil))
   (phase :idle :read-only t)
   (members '() :read-only t)
@@ -201,7 +205,8 @@ or PATCH-VETOED when a static check refuses."
 for ALPHA and BETA (as each member's SPRT does)"
   (make-cluster :upper-milli (round (* 1000 (log (/ (- 1d0 beta) alpha))))))
 
-;;; Reading and Rebuilding the Value
+;;; ---------------------------------------------------------------------
+;;; Reading and rebuilding the value
 
 (defun find-view (cluster id)
   (find id (cluster-members cluster) :key #'member-view-id :test #'equal))
@@ -256,7 +261,9 @@ for ALPHA and BETA (as each member's SPRT does)"
          :pooled-sprt-reject)
         (t nil)))
 
-;;; Step - Transition for one conductor event (add a member, ship or receive a message)
+;;; ---------------------------------------------------------------------
+;;; Step: transition for one conductor event
+;;; (add a member, ship or receive a message).
 ;;; Every function from here through progress returns the same
 ;;; (values next-cluster effects) where effects are
 ;;; (:send member-id message) or (:audit event . field)
@@ -307,8 +314,9 @@ member's view + do whatever the cluster now calls for."
        (null (cdr (last value)))
        (evenp (length (rest value)))))
 
-;;; Fold - take one members message into its own view, dispatched
-;;; on the message type.
+;;; ---------------------------------------------------------------------
+;;; Fold: take one member's message into its own view
+;;; Dispatched on the message type.
 ;;; Returns (values next-cluster effects)
 
 (defun fold-message (cluster view message)
@@ -387,8 +395,10 @@ and reports :DIED"
                                      :final (list :state :died)))
                  '()))))
 
-;;; Progress: What the cluster calls for and dispatched on the phase.
-;;; Returrns: (values next-cluster effects)
+;;; ---------------------------------------------------------------------
+;;; Progress: what the cluster calls for
+;;; Dispatched on the phase.
+;;; Returns (values next-cluster effects)
 
 (defun progress-phase (cluster)
   "Whatever the folded CLUSTER calls for"
@@ -438,14 +448,45 @@ LLR reaches the upper bound"
                       (broadcast cluster '(:rollback))))
         (values cluster '()))))
 
-;;; Conductor's Adapter - Each one defines a method for its own type
+;;; ---------------------------------------------------------------------
+;;; Adapters
 
+;;; Conductor's adapter: each one defines a method for its own type.
 (defgeneric send-to-member (adapter member-id message)
   (:documentation "Deliver MESSAGE to the member ADAPTER knows as MEMBER-ID.
 Conductor calls it while holding its lock, so method cannot call back
 into that conductor on the same thread"))
 
-;;; Conductor: Cluster value behidn a lock and the effects it calls for
+;;; Member's adapter: each one defines methods for its own type.
+;;; Only SEND-TO-CONDUCTOR has no default.
+(defgeneric send-to-conductor (adapter message)
+  (:documentation "Deliver MESSAGE from member to conductor. A member
+can call it from several threads at once, so the method must be safe to
+call like that"))
+
+(defgeneric member-committed (adapter cluster-member patch-set)
+  (:documentation "Called on the thread that delivered :COMMIT once the
+PATCH-SET is installed on CLUSTER-MEMBER. Adapter with a workload starts it
+and the workload calls MEMBER-SEND-HEALTH. Value is ignore"))
+
+(defmethod member-committed (adapter cluster-member patch-set)
+  "Adapter with no workload of its own"
+  (declare (ignore adapter cluster-member patch-set))
+  :no-workload)
+
+(defgeneric final-report-fields (adapter patch-set)
+  (:documentation "Extra fields for member's :FINAL report as a plist of wire values.
+Called once PATCH-SET is terminal. Adapter that closes its audit log here closes it after
+the set's last transition"))
+
+(defmethod final-report-fields (adapter patch-set)
+  "No extra fields"
+  (declare (ignore adapter patch-set))
+  '())
+
+;;; ---------------------------------------------------------------------
+;;; Conductor
+;;; Cluster value behind a lock and the effects it calls for.
 
 (defstruct (conductor (:constructor %make-conductor
                           (adapter alpha-ppm beta-ppm cluster)))
@@ -508,35 +549,9 @@ Safe to call from several threads! Returns the phase after it"
   "Each member's final report (:MEMBER id :STATE state ...) in the order added"
   (cluster-finals (conductor-cluster conductor)))
 
-;;; Member's adapter - Each one defines methods for its own type.
-;;; Only SEND-TO-CONDUCTOR has no default.
-
-(defgeneric send-to-conductor (adapter message)
-  (:documentation "Deliver MESSAGE from member to conductor. A member
-can call it from several threads at once, so the method must be safe to
-call like that"))
-
-(defgeneric member-committed (adapter cluster-member patch-set)
-  (:documentation "Called on the thread that delivered :COMMIT once the
-PATCH-SET is installed on CLUSTER-MEMBER. Adapter with a workload starts it
-and the workload calls MEMBER-SEND-HEALTH. Value is ignore"))
-
-(defmethod member-committed (adapter cluster-member patch-set)
-  "Adapter with no workload of its own"
-  (declare (ignore adapter cluster-member patch-set))
-  :no-workload)
-
-(defgeneric final-report-fields (adapter patch-set)
-  (:documentation "Extra fields for member's :FINAL report as a plist of wire values.
-Called once PATCH-SET is terminal. Adapter that closes its audit log here closes it after
-the set's last transition"))
-
-(defmethod final-report-fields (adapter patch-set)
-  "No extra fields"
-  (declare (ignore adapter patch-set))
-  '())
-
-;;; Members. Called CLUSTER-MEMBER because MEMBER is a COMMON-LISP symbol.
+;;; ---------------------------------------------------------------------
+;;; Members
+;;; Called CLUSTER-MEMBER because MEMBER is a COMMON-LISP symbol.
 ;;; The accessors are MEMBER-, like the rest of the member functions due to a
 ;;; little trickery.
 

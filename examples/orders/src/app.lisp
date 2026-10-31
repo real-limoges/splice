@@ -38,7 +38,8 @@
 (defvar *pristine-order-shape* nil)
 
 ;;; ---------------------------------------------------------------------
-;;; Deterministic 64-bit LCG, so every session is reproducible from its seed.
+;;; Deterministic RNG
+;;; A 64-bit LCG, so every session is reproducible from its seed.
 
 (defun make-rng (seed) (%make-rng :state (logand (+ seed 2862933555777941757)
                                                  #xffffffffffffffff)))
@@ -55,7 +56,9 @@
 (defun rng-range (rng lo hi)
   (+ lo (mod (rng-next rng) (1+ (- hi lo)))))
 
-;;; --- The application under patch: an order-processing service
+;;; ---------------------------------------------------------------------
+;;; Application under patch
+;;; An order-processing service.
 
 (defclass order ()
   ((id :initarg :id :initform 0 :accessor order-id)
@@ -75,7 +78,9 @@
         ((equal code "VIP") 17/20)
         (t 1)))
 
-;; --- original implementations (float dollars; classic representation debt)
+;;; ---------------------------------------------------------------------
+;;; Original implementations
+;;; Float dollars; classic representation debt.
 
 (defun price-order (order)
   (setf (order-float-total order)
@@ -109,6 +114,9 @@ joining the set."
   (let ((total (total-invoice order)))
     (with-output-to-string (s) (print-total order s))
     total))
+
+;;; ---------------------------------------------------------------------
+;;; Pristine references
 
 ;; bind the *PRISTINE-FNS* declared at the top, now that the originals exist.
 ;; DEFVAR binds only on first load, so a reload never captures patched code.

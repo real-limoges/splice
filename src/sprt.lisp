@@ -10,6 +10,9 @@
 
 (in-package #:splice)
 
+;;; ---------------------------------------------------------------------
+;;; Sequential test
+
 (defstruct (sprt (:constructor %make-sprt))
   (llr 0.0d0 :type double-float)
   (n 0 :type fixnum)
@@ -74,8 +77,11 @@ reproducible from the log alone, because I'm paranoid"
         :p0 (float (sprt-p0 sprt) 1.0) :p1 (float (sprt-p1 sprt) 1.0)
         :alpha (sprt-alpha sprt) :beta (sprt-beta sprt)))
 
-;;; Control-arm tracking. Ring buffers of recent control outcomes/latencies
-;;; give the baseline and the confound check.
+;;; ---------------------------------------------------------------------
+;;; Control-arm tracking
+;;; Ring buffers of recent control outcomes/latencies give the baseline and
+;;; the confound check.
+
 (defstruct (control-ring (:constructor %make-control-ring))
   (outcomes nil) (latencies nil) (size 500) (head 0) (count 0)
   (lock (sb-thread:make-mutex)))

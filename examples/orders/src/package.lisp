@@ -25,4 +25,11 @@
    #:session-result-tasks-run
    #:session-result-detection-observations #:session-result-veto-p
    #:session-result-reversal-report #:session-result-pre-existing-snapshot
-   #:session-result-post-rollback-comparison #:session-result-wallclock-ms))
+   #:session-result-post-rollback-comparison #:session-result-wallclock-ms
+
+   ;; observer hooks
+   #:live-session #:*live-session* #:live-session-patch-set
+   #:live-session-orders #:live-session-seed #:live-session-fault
+   #:live-session-threads #:live-session-started
+   #:live-session-audit-start-seq #:live-session-paused-at
+   #:old-pinned-task-id #:start-held-task))

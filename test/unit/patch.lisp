@@ -6,12 +6,21 @@
 (def-suite patch :in splice-tests)
 (in-suite patch)
 
+;;; ---------------------------------------------------------------------
+;;; Probe functions
 ;;; Functions for the patch sets below to replace. Each test registers its
 ;;; sets under its own names and drops them afterwards.
 
 (defun probe-one (x) x)
 (defun probe-two (a b) (list a b))
 
+(defun unreadable-probe ()
+  "A two-argument function whose lambda list (debug 0) leaves unrecorded"
+  (compile nil '(lambda (a b)
+                 (declare (optimize (debug 0)))
+                 (list a b))))
+
+;;; ---------------------------------------------------------------------
 ;;; Declaration
 
 (test parse-arity
@@ -44,6 +53,43 @@
                                                      (set-of 'a 'c 'd))))
     (is (null (splice::shared-function-names (set-of 'a) (set-of 'b))))))
 
+;;; ---------------------------------------------------------------------
+;;; Lambda lists
+
+(test lambda-list-of-agrees-with-sb-introspect
+  (let* ((probe (splice::make-patch-set :name 'arity-probe))
+         (cases (list #'probe-one
+                      #'probe-two
+                      (compile nil '(lambda (a &optional b) (list a b)))
+                      (funcall (compile nil '(lambda (x) (lambda (a b) (+ a b x)))) 1)
+                      #'print-object)))
+    (dolist (f cases)
+      (is (equal (multiple-value-list
+                  (splice::parse-arity (splice::lambda-list-of f)))
+                 (multiple-value-list
+                  (splice::parse-arity (sb-introspect:function-lambda-list f))))
+          "arity of ~a" f))))
+
+(test lambda-list-of-names-an-unreadable-lambda-list
+  (is (eq :unknown (splice::lambda-list-of (unreadable-probe))))
+  (is (eq :unknown (splice::lambda-list-of
+                    (compile nil '(lambda (a &key k)
+                                   (declare (optimize (debug 0)))
+                                   (list a k)))))))
+
+(test an-unreadable-lambda-list-gets-a-variadic-shim
+  (is (eq :variadic (splice::fixed-arity :unknown)))
+  (is (eq :variadic (splice::fixed-arity '(a &optional b))))
+  (is (= 2 (splice::fixed-arity '(a b)))))
+
+(test lambda-list-of-reads-through-a-trace
+  (unwind-protect
+       (progn
+         (trace probe-two)
+         (is (equal '(a b) (splice::lambda-list-of (fdefinition 'probe-two)))))
+    (untrace probe-two)))
+
+;;; ---------------------------------------------------------------------
 ;;; Registration's static checks
 
 (defun register-veto (ps)
@@ -123,6 +169,7 @@
         (is (eq :contract-result (getf entry :event)))
         (is (eq :veto (getf entry :verdict)))))))
 
+;;; ---------------------------------------------------------------------
 ;;; Contracts
 
 (test check-contract-verdicts
@@ -197,44 +244,3 @@
                    (loop for entry in (log-entries path)
                          when (eq :contract-result (getf entry :event))
                            collect (getf entry :verdict))))))))
-
-(test lambda-list-of-agrees-with-sb-introspect
-  (let* ((probe (splice::make-patch-set :name 'arity-probe))
-         (cases (list #'probe-one
-                      #'probe-two
-                      (compile nil '(lambda (a &optional b) (list a b)))
-                      (funcall (compile nil '(lambda (x) (lambda (a b) (+ a b x)))) 1)
-                      #'print-object)))
-    (dolist (f cases)
-      (is (equal (multiple-value-list
-                  (splice::parse-arity (splice::lambda-list-of f)))
-                 (multiple-value-list
-                  (splice::parse-arity (sb-introspect:function-lambda-list f))))
-          "arity of ~a" f))))
-
-(defun unreadable-probe ()
-  "A two-argument function whose lambda list (debug 0) leaves unrecorded"
-  (compile nil '(lambda (a b)
-                 (declare (optimize (debug 0)))
-                 (list a b))))
-
-(test lambda-list-of-names-an-unreadable-lambda-list
-  (is (eq :unknown (splice::lambda-list-of (unreadable-probe))))
-  (is (eq :unknown (splice::lambda-list-of
-                    (compile nil '(lambda (a &key k)
-                                   (declare (optimize (debug 0)))
-                                   (list a k)))))))
-
-(test an-unreadable-lambda-list-gets-a-variadic-shim
-  (is (eq :variadic (splice::fixed-arity :unknown)))
-  (is (eq :variadic (splice::fixed-arity '(a &optional b))))
-  (is (= 2 (splice::fixed-arity '(a b)))))
-
-(test lambda-list-of-reads-through-a-trace
-  (unwind-protect
-       (progn
-         (trace probe-two)
-         (is (equal '(a b) (splice::lambda-list-of (fdefinition 'probe-two)))))
-    (untrace probe-two)))
-
-()

@@ -8,6 +8,13 @@
   "How long rollback and promotion wait for pinned tasks to drain. Either one
 freezes the set when the wait runs out.")
 
+(defvar *audit-sprt-steps* nil
+  "When true, audit every canary observations SPRT state as :SPRT-STEP
+This is off by default, a long criteria would log every observation")
+
+;;; ---------------------------------------------------------------------
+;;; State transitions
+
 (defun transition (ps to &rest fields)
   "Move PS to state TO, record history, and audit. Caller holds the lock."
   (let ((from (patch-set-state ps)))
@@ -35,7 +42,9 @@ tests exceedance of the control p95, so its p0 is fixed at 0.05."
                    :min-n (patch-set-sprt-min-n ps)
                    :max-n (patch-set-sprt-max-n ps))))
 
-;;; INSTALL: contracts gate -> shims (dormant) -> atomic flip to first stage
+;;; ---------------------------------------------------------------------
+;;; Install
+;;; Contracts gate -> shims (dormant) -> atomic flip to first stage
 
 (defun install (name-or-ps)
   "Take a REGISTERED patch set through contracts into its first canary
@@ -83,7 +92,9 @@ stage. Signals PATCH-VETOED, installing nothing, if any contract fails."
                 :fraction fraction
                 :sprt (sprt-snapshot (patch-set-sprt-error ps) :errors))))
 
-;;; EVALUATOR: every task outcome flows through here (via WITH-TASK)
+;;; ---------------------------------------------------------------------
+;;; Evaluator
+;;; Every task outcome flows through here (via WITH-TASK)
 
 (defun report-outcome (ps route failure-p latency-ms &key condition)
   "Fold one task outcome into PS's evaluator. Control (:old) outcomes feed
@@ -136,6 +147,7 @@ transition. Returns the action taken: :continue when nothing changed, else
                                         (> latency-ms
                                            (max (* 1.5 p95) (+ p95 0.5))))
                           :continue)))
+    (audit-sprt-step ps err-sprt lat-sprt)
     ;; sample runtime contracts: structural breakage is not a rate question
     (when (and (plusp (patch-set-runtime-contract-interval ps))
                (zerop (mod (sprt-n err-sprt)
@@ -170,6 +182,18 @@ transition. Returns the action taken: :continue when nothing changed, else
                                :latency (sprt-snapshot lat-sprt :latency)))
        :frozen)
       (t :continue))))
+
+(defun sprt-point (sprt)
+  "SPRT's position as (n . llr). llr is a single float like SPRT-SNAPSHOT"
+  (cons (sprt-n sprt) (float (sprt-llr sprt) 1.0)))
+
+(defun audit-sprt-step (ps err-sprt lat-sprt)
+  "Audit a canary observation's SPRT positions when *AUDIT-SPRT-STEPS* is on"
+  (when *audit-sprt-steps*
+    (audit :sprt-step :patch-set (patch-set-name ps)
+                      :stage (patch-set-stage-index ps)
+                      :errors (sprt-point err-sprt)
+                      :slow (sprt-point lat-sprt))))
 
 ;;; ---------------------------------------------------------------------
 ;;; Rollback

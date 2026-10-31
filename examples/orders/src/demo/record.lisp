@@ -4,16 +4,24 @@
 (in-package #:splice-orders/demo)
 
 (defstruct (play-position (:constructor make-position (&key hold)))
-  (lock (sb-thread:make-mutex :name "demo-player-position"))
+  (lock (sb-thread:make-mutex :name "demo-player-position") :read-only t)
+  (hold nil :read-only t)
+  ;; mutable
   (index 0)
   (jump nil)
-  (paused nil)
-  (hold nil))
+  (paused nil))
 
-(defstruct player thread position (running t))
+(defstruct player
+  (position nil :read-only t)
+  ;; mutable
+  (thread nil)
+  (running t))
 
 (defvar *player* nil
   "Replay player: its thread, position, and stop flag. NIL before first replay")
+
+;;; ---------------------------------------------------------------------
+;;; Recording
 
 (defun make-recorder (path header)
   "Open PATH and write the HEADER. Returns two values;
@@ -43,8 +51,8 @@ recordings/act-2-seed-2002-20261028T170211.sexp in placed in the example's tree.
       (string-trim `(#\Newline #\Space)
                    (uiop:run-program (list "git" "-C" (namestring (asdf:system-source-directory "splice"))
                                            "describe" "--always" "--dirty" "--abbrev=7")
-                                     :output :string)))
-  (error () "unknown"))
+                                     :output :string))
+    (error () "unknown")))
 
 ;;; TODO - Rework this. I really hate a lot of this
 (defun recording-header (act settings)
@@ -60,8 +68,18 @@ It's a plist of :seed :fault :threads :pre-existing"
         :threads (getf settings :threads)
         :pre-existing (getf settings :pre-existing)))
 
+;;; ---------------------------------------------------------------------
+;;; Loading
+
 (defun load-recording (path &key (commit (splice-commit)))
-  "Read at PATH. Still working out what to return here"
+  "Read the recording at PATH. Returns (values status header snapshots), STATUS one of
+:loaded, :missing, :wrong-recording-version, :empty, :wrong-snapshot-version or :wrong-commit.
+COMMIT NIL skips the commit check."
+  (if (probe-file path)
+      (read-recording path commit)
+      (values :missing nil nil)))
+
+(defun read-recording (path commit)
   (with-open-file (in path)
     (let* ((header (read-snapshot in))
            (snapshots (coerce (read-all-snapshots in) 'vector)))
@@ -78,6 +96,9 @@ It's a plist of :seed :fault :threads :pre-existing"
 (defun current-version-p (form)
   "True when FORM (a header or snapshot) is at this image's snapshot version."
   (eql +snapshot-version+ (or (getf form :snapshot-version) (getf form :version))))
+
+;;; ---------------------------------------------------------------------
+;;; Replay
 
 (defun next-step (position count)
   "What the player does next - (:play i), (:jump i), :paused or :done"
@@ -126,6 +147,9 @@ It's a plist of :seed :fault :threads :pre-existing"
       (when (eq step :done) (return :finished))
       (play-step step snapshots sink speed on-jump))))
 
+;;; ---------------------------------------------------------------------
+;;; Player
+
 (defun mark-replay (snapshot header index count faults)
   "SNAPSHOT with :replay plist for the replay row, and the player's FAULTS in
 of any it was recorded with. Never recorded."
@@ -166,11 +190,12 @@ Returns :started or :already-running"
 
 (defun stop-player ()
   "Stop player + wait for thread to exit.
-Returns :stopped or :not-running"
+Returns :stopped, :not-joined (didn't finish in 5 seconds) or :not-running"
   (if (player-alive-p)
-      (progn  (setf (player-running *player*) nil)
-              (sb-thread:join-thread (player-thread *player*) :default :aborted)
-              :stopped)
+      (let ((thread (player-thread *player*)))
+        (setf (player-running *player*) nil)
+        (sb-thread:join-thread thread :default :aborted :timeout 5)
+        (if (sb-thread:thread-alive-p thread) :not-joined :stopped))
       :not-running))
 
 (defun jump-player (index)
@@ -192,3 +217,45 @@ Returns :paused, :playing, or :no-player"
           (setf (play-position-paused position) paused))
         (if paused :paused :playing))
       :no-player))
+
+;;; ---------------------------------------------------------------------
+;;; Checking a recording against its audit log
+
+(defun check-recording (snapshots audit-path)
+  "Whether every SPRT point in SNAPSHOTS is an :sprt-step entry of AUDIT-PATH in the recording's
+seq range. Returns :consistent, :inconsistent or :broken-log."
+  (multiple-value-bind (ok logged) (sprt-points-in-log audit-path (seq-range snapshots))
+    (cond ((not ok) :broken-log)
+          ((subsetp (recorded-sprt-points snapshots) logged :test #'equal) :consistent)
+          (t :inconsistent))))
+
+(defun seq-range (snapshots)
+  "(start . end): the session's audit start seq and the last snapshot's :audit-seq."
+  (cons (getf (getf (aref snapshots 0) :session) :audit-start-seq)
+        (getf (aref snapshots (1- (length snapshots))) :audit-seq)))
+
+(defun sprt-points-in-log (path range)
+  "The stream-tagged points of every :sprt-step entry in RANGE, and whether the chain verified."
+  (let ((points '()))
+    (let ((ok (splice::map-audit-entries
+               path (lambda (entry)
+                      (when (sprt-step-in-range-p entry range)
+                        (setf points (append (entry-points entry) points)))))))
+      (values ok points))))
+
+(defun sprt-step-in-range-p (entry range)
+  (and (eq :sprt-step (getf entry :event))
+       (< (car range) (getf entry :seq) (1+ (cdr range)))))
+
+(defun entry-points (entry)
+  (list (cons :errors (getf entry :errors))
+        (cons :slow (getf entry :slow))))
+
+(defun recorded-sprt-points (snapshots)
+  "Every SPRT point any snapshot draws, tagged with its stream, without repeats."
+  (remove-duplicates
+   (loop for snapshot across snapshots
+         for sprt = (getf snapshot :sprt)
+         append (mapcar (lambda (point) (cons :errors point)) (getf sprt :errors))
+         append (mapcar (lambda (point) (cons :slow point)) (getf sprt :slow)))
+   :test #'equal))

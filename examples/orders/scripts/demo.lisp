@@ -34,7 +34,9 @@
 (open-audit-log *log-path*)
 (format t "~%splice demo, audit log: ~a~%" *log-path*)
 
-;;; --------------------------------------------------------------------
+;;; ---------------------------------------------------------------------
+;;; Splice in
+
 (headline "1. Splice in: clean patch, canary ramp 5% -> 25% -> 100% -> promoted")
 
 (let ((r (run-canary-session :fault nil :seed 1001 :quiet t)))
@@ -50,7 +52,9 @@
       (format t "post-promotion order total: ~a cents (exact rational math)~%"
               (order-cents o)))))
 
-;;; --------------------------------------------------------------------
+;;; ---------------------------------------------------------------------
+;;; Splice out
+
 (headline "2. Splice out: latent fault caught mid-ramp, fully reverted")
 
 (format t "fault: ~a~%~%" (fault-description :latent))
@@ -75,7 +79,9 @@ class has no minor-units slot: ~a)~%"
             (order-float-total o)
             (not (slot-exists-p o 'splice-orders::amount-minor-units)))))
 
-;;; --------------------------------------------------------------------
+;;; ---------------------------------------------------------------------
+;;; Trace the splices
+
 (headline "3. Trace the splices: the audit log is the source of truth")
 
 (close-audit-log)

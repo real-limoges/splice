@@ -16,6 +16,7 @@
 
 (def-suite splice-tests :description "Unit tests for splice.")
 
+;;; ---------------------------------------------------------------------
 ;;; Audit logs
 
 (defun temp-log-path ()
@@ -43,6 +44,7 @@
 (defun log-lines (path)
   (uiop:read-file-lines path))
 
+;;; ---------------------------------------------------------------------
 ;;; Patch sets
 
 (defmacro with-patch-set-names ((&rest names) &body body)

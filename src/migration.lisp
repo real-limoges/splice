@@ -27,6 +27,7 @@ new code made and leaves the old-code ones alone. Strong keys, as above.")
 (defvar *journal-seq* 0)
 (defvar *migration-lock* (sb-thread:make-mutex))
 
+;;; ---------------------------------------------------------------------
 ;;; Capturing and rebuilding class shapes via the MOP
 
 (defun canonicalize-slot-spec (spec)
@@ -99,6 +100,8 @@ new code made and leaves the old-code ones alone. Strong keys, as above.")
         when (slot-boundp instance name)
           append (list name (slot-value instance name))))
 
+;;; ---------------------------------------------------------------------
+;;; Instance migration
 ;;; One :AFTER method on STANDARD-OBJECT consults the registry, instead of
 ;;; generating a method per class. Untracked classes pay one hash lookup.
 
@@ -196,7 +199,9 @@ canary-born, and the author's backward migration synthesizes old values."
         (sb-thread:with-mutex (*migration-lock*)
           (setf (gethash instance *canary-population*) (cons name route)))))))
 
-;;; Phase drivers (called by the lifecycle controller)
+;;; ---------------------------------------------------------------------
+;;; Phase drivers
+;;; Called by the lifecycle controller.
 
 (defun begin-class-canary (ps cp)
   "Apply the union shape and start forward migration (lazy, on first touch)."
