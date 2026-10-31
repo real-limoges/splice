@@ -58,7 +58,8 @@ presenter gate, recording and the act driver. Everything testable without a brow
                              (:file "render")
                              (:file "gate")
                              (:file "chain")
-                             (:file "record"))))
+                             (:file "record")
+                             (:file "driver"))))
   :in-order-to ((test-op (test-op "splice-orders/demo-tests"))))
 
 (defsystem "splice-orders/demo-tests"

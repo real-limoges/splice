@@ -166,3 +166,13 @@ the recording, or :sampler-stuck / :player-stuck."
   (clog:set-on-change (clog:attach-as-child body "scrub" :clog-type 'clog:clog-form-element)
                       (lambda (element)
                         (d:jump-player (parse-integer (or (clog:value element) "") :junk-allowed t)))))
+
+(defun start-live-act (act)
+  "Start ACCT with the page as a sink. Returns recording path, :session-running
+or :player-stuck / :sampler-stuck"
+  (d:start-act act (list #'write-frame)))
+
+(defun restart-live-view ()
+  "Draw live frames again after a replay or a dead sampler in the same recording"
+  (d:restart-sampler
+   (list #'write-frame)))
